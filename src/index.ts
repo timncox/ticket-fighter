@@ -21,6 +21,8 @@ import { bostonAdapter, miamiAdapter, charlotteAdapter, denverAdapter, dallasAda
 import { baltimoreAdapter } from "./adapters/baltimore.js";
 import { dcAdapter } from "./adapters/dc.js";
 import { atlantaAdapter } from "./adapters/atlanta.js";
+import { sanDiegoAdapter, detroitDsAdapter, pittsburghAdapter, milwaukeeAdapter, sacramentoAdapter, newOrleansAdapter } from "./adapters/dspayments-cities.js";
+import { sanFranciscoAdapter, detroitEtimsAdapter, clevelandAdapter, columbusAdapter, oaklandAdapter, santaMonicaAdapter } from "./adapters/etims-cities.js";
 
 registerAdapter(nycAdapter);
 registerAdapter(chicagoAdapter);
@@ -33,6 +35,19 @@ registerAdapter(dallasAdapter);
 registerAdapter(raleighAdapter);
 registerAdapter(baltimoreAdapter);
 registerAdapter(dcAdapter);
+registerAdapter(atlantaAdapter);
+registerAdapter(sanDiegoAdapter);
+registerAdapter(detroitDsAdapter);
+registerAdapter(pittsburghAdapter);
+registerAdapter(milwaukeeAdapter);
+registerAdapter(sacramentoAdapter);
+registerAdapter(newOrleansAdapter);
+registerAdapter(sanFranciscoAdapter);
+registerAdapter(detroitEtimsAdapter);
+registerAdapter(clevelandAdapter);
+registerAdapter(columbusAdapter);
+registerAdapter(oaklandAdapter);
+registerAdapter(santaMonicaAdapter);
 registerAdapter(atlantaAdapter);
 
 const server = new McpServer({

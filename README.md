@@ -2,24 +2,47 @@
 
 An MCP server that automates parking ticket detection, evidence gathering, and dispute preparation across multiple US cities.
 
-## Supported Cities (12)
+## Supported Cities (24)
 
-| City | Plate Lookup | CAPTCHA | Dispute Method | Platform |
-|------|-------------|---------|---------------|----------|
-| **NYC** | Plate + State + Type | reCAPTCHA (invisible) | HBW online hearing | CityPay |
-| **Chicago** | Plate + State + Last Name | hCaptcha | eHearing (Correspondence/Virtual/In-Person) | CHIPAY |
-| **Orlando** | Plate + State | None | Notarized appeal form (PDF) | CPC |
-| **Boston** | Plate + State | None | Online/mail/video appeal | RMC Pay |
-| **Miami** | Plate + State | None | Via Miami Parking Authority | RMC Pay |
-| **Charlotte** | Plate + State | None | 3-tier appeal (Admin/Hearing/Court) | RMC Pay |
-| **Denver** | Plate + State | None | Via RMC Pay portal | RMC Pay |
-| **Dallas** | Plate + State | None | Via RMC Pay portal | RMC Pay |
-| **Raleigh** | Plate + State | None | Via RMC Pay portal | RMC Pay |
-| **Baltimore** | Plate only | None | Phone/in-person (410-396-3000) | Custom |
-| **Washington DC** | Plate + State | Custom image CAPTCHA | DC DMV online | eTIMS |
-| **Atlanta** | Plate + State | None | Duncan appeal portal (14-day deadline) | DS Payments |
+### No CAPTCHA (fully automatable)
 
-RMC Pay cities share a generic adapter — adding a new RMC Pay city is one line of config.
+| City | Platform | Dispute Method |
+|------|----------|---------------|
+| **Boston** | RMC Pay | Online/mail/video appeal |
+| **Miami** | RMC Pay | Via Miami Parking Authority |
+| **Charlotte** | RMC Pay | 3-tier appeal |
+| **Denver** | RMC Pay | Via portal |
+| **Dallas** | RMC Pay | Via portal |
+| **Raleigh** | RMC Pay | Via portal |
+| **Orlando** | CPC | Notarized appeal form (PDF) |
+| **Baltimore** | Custom | Phone/in-person (410-396-3000) |
+| **Atlanta** | DS Payments | Duncan appeal portal (14-day deadline) |
+| **San Diego** | DS Payments | Duncan appeal portal |
+| **Detroit** | DS Payments | Duncan appeal portal |
+| **Pittsburgh** | DS Payments | Duncan appeal portal |
+| **Milwaukee** | DS Payments | Duncan appeal portal |
+| **Sacramento** | DS Payments | Duncan appeal portal |
+| **New Orleans** | DS Payments | Duncan appeal portal |
+
+### CAPTCHA (user solves in browser)
+
+| City | Platform | CAPTCHA Type | Dispute Method |
+|------|----------|-------------|---------------|
+| **NYC** | CityPay | reCAPTCHA (invisible) | HBW online hearing |
+| **Chicago** | CHIPAY | hCaptcha | eHearing |
+| **Washington DC** | eTIMS | Custom image | DC DMV online |
+| **San Francisco** | eTIMS | Custom image | SFMTA citations |
+| **Detroit** (eTIMS) | eTIMS | Custom image | Via portal |
+| **Cleveland** | eTIMS | Custom image | Via portal |
+| **Columbus** | eTIMS | Custom image | Via portal |
+| **Oakland** | eTIMS | Custom image | Via portal |
+| **Santa Monica** | eTIMS | Custom image | Via portal |
+
+### Platform adapters (add new cities with one line of config)
+
+- **RMC Pay** — 50+ US cities use this platform. Add any with: `createRmcPayAdapter({ cityId, displayName, subdomain })`
+- **DS Payments** — 25+ cities. Add with: `createDsPaymentsAdapter({ cityId, displayName, citySlug, appealSlug })`
+- **eTIMS** — 10+ major cities. Add with: `createEtimsAdapter({ cityId, displayName, cityPath, subdomain })`
 
 ## Setup
 
