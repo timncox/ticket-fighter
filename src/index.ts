@@ -13,6 +13,14 @@ import { getAdapter } from "./adapters/registry.js";
 import { setupGmailAuth, searchGmailForDecisions } from "./gmail.js";
 import { gatherEvidence } from "./evidence.js";
 import type { Ticket } from "./adapters/types.js";
+import { registerAdapter } from "./adapters/registry.js";
+import { nycAdapter } from "./adapters/nyc.js";
+import { chicagoAdapter } from "./adapters/chicago.js";
+import { orlandoAdapter } from "./adapters/orlando.js";
+
+registerAdapter(nycAdapter);
+registerAdapter(chicagoAdapter);
+registerAdapter(orlandoAdapter);
 
 const server = new McpServer({
   name: "ticket-fighter",
