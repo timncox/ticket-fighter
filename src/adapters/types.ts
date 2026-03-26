@@ -5,7 +5,7 @@ export interface Plate {
   city: CityId;
 }
 
-export type CityId = "nyc" | "chicago" | "orlando";
+export type CityId = "nyc" | "chicago" | "orlando" | "boston" | "miami" | "charlotte" | "denver" | "dallas" | "raleigh" | "baltimore" | "dc" | "atlanta" | string;
 
 export interface Ticket {
   violationNumber: string;

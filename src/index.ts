@@ -17,10 +17,23 @@ import { registerAdapter } from "./adapters/registry.js";
 import { nycAdapter } from "./adapters/nyc.js";
 import { chicagoAdapter } from "./adapters/chicago.js";
 import { orlandoAdapter } from "./adapters/orlando.js";
+import { bostonAdapter, miamiAdapter, charlotteAdapter, denverAdapter, dallasAdapter, raleighAdapter } from "./adapters/rmcpay-cities.js";
+import { baltimoreAdapter } from "./adapters/baltimore.js";
+import { dcAdapter } from "./adapters/dc.js";
+import { atlantaAdapter } from "./adapters/atlanta.js";
 
 registerAdapter(nycAdapter);
 registerAdapter(chicagoAdapter);
 registerAdapter(orlandoAdapter);
+registerAdapter(bostonAdapter);
+registerAdapter(miamiAdapter);
+registerAdapter(charlotteAdapter);
+registerAdapter(denverAdapter);
+registerAdapter(dallasAdapter);
+registerAdapter(raleighAdapter);
+registerAdapter(baltimoreAdapter);
+registerAdapter(dcAdapter);
+registerAdapter(atlantaAdapter);
 
 const server = new McpServer({
   name: "ticket-fighter",
