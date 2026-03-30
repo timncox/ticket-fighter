@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { chromium } from "playwright";
 import type {
   CityAdapter,
   Ticket,
@@ -110,7 +111,144 @@ function violationToTicket(v: SodaViolation): Ticket {
 }
 
 // ---------------------------------------------------------------------------
-// NYC DOF Adapter — Open Data API
+// CityPay scraper fallback (non-headless — user solves reCAPTCHA)
+// ---------------------------------------------------------------------------
+
+const LOOKUP_URL =
+  "https://a836-citypay.nyc.gov/citypay/Parking?stage=procurement";
+
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function chosenSelect(
+  page: import("playwright").Page,
+  selectId: string,
+  value: string
+): Promise<void> {
+  const chosenContainer = page.locator(`${selectId}_chosen`);
+  if (await chosenContainer.count() > 0) {
+    await chosenContainer.click();
+    await sleep(300);
+    const searchInput = chosenContainer.locator("input[type='text']");
+    if (await searchInput.count() > 0) {
+      await searchInput.fill(value);
+      await sleep(300);
+    }
+    const result = chosenContainer.locator(
+      "li.active-result:has-text('" + value + "')"
+    );
+    if (await result.count() > 0) {
+      await result.first().click();
+    } else {
+      const anyResult = chosenContainer.locator("li.active-result").first();
+      if (await anyResult.count() > 0) await anyResult.click();
+    }
+  } else {
+    const sel = page.locator(selectId);
+    await sel.selectOption({ label: value });
+  }
+}
+
+async function scrapeCityPay(
+  plate: string,
+  state: string,
+  type: string
+): Promise<Ticket[]> {
+  const browser = await chromium.launch({ headless: false });
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      locale: "en-US",
+    });
+    const page = await context.newPage();
+
+    await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
+    await sleep(3000);
+
+    // Click the License Plate tab
+    const plateTab = page.locator(
+      "button:has-text('License Plate'), a:has-text('License Plate'), [role='tab']:has-text('License Plate')"
+    );
+    if (await plateTab.count() > 0) {
+      await plateTab.first().click();
+      await sleep(1000);
+    }
+
+    // Fill plate number
+    const plateInput = page.locator(
+      "input[name*='plate'], input[id*='plate'], input[placeholder*='plate' i], input[placeholder*='Plate' i]"
+    );
+    await plateInput.first().fill(plate);
+
+    // Select state and type via Chosen dropdowns
+    await chosenSelect(page, "#PLATE_STATE", state);
+    await chosenSelect(page, "#PLATE_TYPE", type);
+
+    // Submit — user will need to solve reCAPTCHA in the visible browser
+    await page.locator("button[type='submit']").first().evaluate(
+      (btn: HTMLButtonElement) => btn.click()
+    );
+
+    // Wait for results — give user time to solve CAPTCHA
+    await page.waitForSelector("table tbody tr, .no-results, .error-message", {
+      timeout: 120_000,
+    }).catch(() => {});
+    await sleep(3000);
+
+    // Parse tickets from the results table
+    const tickets: Ticket[] = [];
+    const rows = page.locator("table tbody tr, [role='row']:not(:first-child)");
+    const rowCount = await rows.count();
+
+    for (let i = 0; i < rowCount; i++) {
+      const row = rows.nth(i);
+      const cells = row.locator("td, [role='cell']");
+      const cellCount = await cells.count();
+      if (cellCount < 3) continue;
+
+      const cellTexts: string[] = [];
+      for (let j = 0; j < cellCount; j++) {
+        cellTexts.push((await cells.nth(j).innerText()).trim());
+      }
+
+      const violationNumber = cellTexts[0] ?? "";
+      const dateIssued = cellTexts[1] ?? "";
+      const violationCode = cellTexts[2] ?? "";
+      const description =
+        cellTexts[3] ??
+        NYC_CODES[violationCode]?.description ??
+        "Unknown violation";
+      const amountStr = cellTexts[4] ?? "0";
+      const amount = parseFloat(amountStr.replace(/[^0-9.]/g, "")) || 0;
+      const status = cellTexts[5] ?? "unknown";
+
+      if (!violationNumber) continue;
+
+      tickets.push({
+        violationNumber,
+        dateIssued,
+        violationCode,
+        description,
+        amount,
+        status,
+        location: cellTexts[6] ?? "",
+        city: "nyc",
+        plate,
+      });
+    }
+
+    return tickets;
+  } finally {
+    await browser.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NYC DOF Adapter — Open Data API + CityPay scraper fallback
 // ---------------------------------------------------------------------------
 
 export const nycAdapter: CityAdapter = {
@@ -120,15 +258,44 @@ export const nycAdapter: CityAdapter = {
   async lookupTickets(
     plate: string,
     state: string,
-    _type: string
+    type: string
   ): Promise<Ticket[]> {
+    // Primary: Open Data API (fast, no CAPTCHA, but can lag weeks behind)
     const where = encodeURIComponent(
       `plate='${plate.toUpperCase()}' AND state='${state.toUpperCase()}'`
     );
-    const results = await queryApi(
+    const apiResults = await queryApi(
       `$where=${where}&$order=issue_date DESC&$limit=50`
     );
-    return results.map(violationToTicket);
+    const apiTickets = apiResults.map(violationToTicket);
+
+    // Check if API data is stale — if newest ticket is >30 days old,
+    // fall back to CityPay scraper for real-time results
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    const newestDate = apiResults.length > 0
+      ? new Date(apiResults[0].issue_date).getTime()
+      : 0;
+
+    if (newestDate < thirtyDaysAgo) {
+      // API may be stale — try CityPay scraper (opens browser for reCAPTCHA)
+      try {
+        const scraperTickets = await scrapeCityPay(plate, state, type);
+        if (scraperTickets.length > 0) {
+          // Merge: scraper results + API results not already in scraper set
+          const scraperNums = new Set(scraperTickets.map((t) => t.violationNumber));
+          const merged = [
+            ...scraperTickets,
+            ...apiTickets.filter((t) => !scraperNums.has(t.violationNumber)),
+          ];
+          return merged;
+        }
+      } catch {
+        // Scraper failed (CAPTCHA not solved, etc.) — return API results
+      }
+    }
+
+    return apiTickets;
   },
 
   async getTicketDetails(violationNumber: string): Promise<TicketDetail> {
