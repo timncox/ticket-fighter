@@ -22,7 +22,8 @@ import { baltimoreAdapter } from "./adapters/baltimore.js";
 import { dcAdapter } from "./adapters/dc.js";
 import { atlantaAdapter } from "./adapters/atlanta.js";
 import { sanDiegoAdapter, detroitDsAdapter, pittsburghAdapter, milwaukeeAdapter, sacramentoAdapter, newOrleansAdapter } from "./adapters/dspayments-cities.js";
-import { sanFranciscoAdapter, detroitEtimsAdapter, clevelandAdapter, columbusAdapter, oaklandAdapter, santaMonicaAdapter } from "./adapters/etims-cities.js";
+import { detroitEtimsAdapter, clevelandAdapter, columbusAdapter, oaklandAdapter, santaMonicaAdapter } from "./adapters/etims-cities.js";
+import { sfAdapter } from "./adapters/sf.js";
 import { readFileSync } from "node:fs";
 import {
   registerAppResource,
@@ -48,7 +49,7 @@ registerAdapter(pittsburghAdapter);
 registerAdapter(milwaukeeAdapter);
 registerAdapter(sacramentoAdapter);
 registerAdapter(newOrleansAdapter);
-registerAdapter(sanFranciscoAdapter);
+registerAdapter(sfAdapter);
 registerAdapter(detroitEtimsAdapter);
 registerAdapter(clevelandAdapter);
 registerAdapter(columbusAdapter);
