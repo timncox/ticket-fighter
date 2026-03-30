@@ -325,7 +325,7 @@ registerAppResource(
     description: "Ticket Fighter — parking ticket dashboard and dispute assistant",
     _meta: {
       ui: {
-        domain: "https://ticket-fighter.local",
+
         csp: { connectDomains: [], resourceDomains: [] },
       },
     },
@@ -337,7 +337,7 @@ registerAppResource(
       text: widgetHtml,
       _meta: {
         ui: {
-          domain: "https://ticket-fighter.local",
+  
           csp: { connectDomains: [], resourceDomains: [] },
         },
       },
