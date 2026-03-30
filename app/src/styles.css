@@ -1,0 +1,114 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #09090b;
+  color: #e4e4e7;
+  -webkit-font-smoothing: antialiased;
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a { color: #7dd3fc; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.header .subtitle {
+  font-size: 12px;
+  color: #71717a;
+}
+
+.card {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #71717a;
+  margin-bottom: 2px;
+}
+
+.value { font-size: 13px; }
+
+.mono { font-family: ui-monospace, 'SF Mono', monospace; }
+
+.badge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  display: inline-block;
+}
+
+.badge-red { background: #7f1d1d; color: #fca5a5; }
+.badge-green { background: #14532d; color: #86efac; }
+.badge-blue { background: #172554; color: #93c5fd; }
+.badge-yellow { background: #422006; color: #fde047; }
+.badge-gray { background: #27272a; color: #a1a1aa; }
+
+.amount { font-family: ui-monospace, monospace; font-weight: 600; }
+.amount-lg { font-size: 20px; }
+
+.defense-list { list-style: none; padding: 0; }
+.defense-list li {
+  padding: 6px 0;
+  border-bottom: 1px solid #27272a;
+  font-size: 13px;
+  color: #7dd3fc;
+}
+.defense-list li:last-child { border-bottom: none; }
+
+.info-banner {
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+.info-banner.blue { background: #172554; border: 1px solid #1e3a5f; color: #93c5fd; }
+.info-banner.green { background: #14532d; border: 1px solid #166534; color: #86efac; }
+.info-banner.red { background: #7f1d1d; border: 1px solid #991b1b; color: #fca5a5; }
+
+.empty {
+  text-align: center;
+  color: #52525b;
+  padding: 32px 16px;
+  font-size: 13px;
+}
+
+.error {
+  color: #ef4444;
+  font-size: 13px;
+  margin-top: 8px;
+}
