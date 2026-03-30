@@ -11,12 +11,9 @@ import type {
   DisputeStatus,
 } from "./types.js";
 
-const LOOKUP_URL =
-  "https://webapps1.chicago.gov/payments-web/#/validatedFlow?cityServiceId=1";
-const EHEARING_URL = "https://parkingtickets.chicago.gov/EHearingWeb/home";
-
-const USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+// ---------------------------------------------------------------------------
+// Violation code database
+// ---------------------------------------------------------------------------
 
 interface ViolationCodeEntry {
   description: string;
@@ -37,136 +34,229 @@ function getCodeInfo(code: string): ViolationCodeEntry {
   return CHICAGO_CODES[code] ?? { description: "Unknown violation", fine: 0, defenses: [] };
 }
 
+// ---------------------------------------------------------------------------
+// CHIPAY JSON API (undocumented, no CAPTCHA)
+// ---------------------------------------------------------------------------
+
+const CHIPAY_API = "https://webapps1.chicago.gov/payments-web";
+
+async function getChipayToken(): Promise<string> {
+  const resp = await fetch(`${CHIPAY_API}/security/tokens`, {
+    headers: { "chipay-security": "open" },
+  });
+  if (!resp.ok) throw new Error(`CHIPAY token error: ${resp.status}`);
+  const data = await resp.json() as { token: string };
+  return data.token;
+}
+
+interface ChipaySearchResult {
+  ticketNumber?: string;
+  issueDate?: string;
+  violationCode?: string;
+  violationDescription?: string;
+  currentAmountDue?: number;
+  originalAmount?: number;
+  location?: string;
+  licensePlate?: string;
+  vehicleMake?: string;
+  vehicleColor?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+async function chipaySearch(
+  token: string,
+  searchCategoryId: number,
+  fields: { fieldKey: string; fieldValue: string }[],
+): Promise<ChipaySearchResult[]> {
+  const resp = await fetch(`${CHIPAY_API}/api/searches`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "chipay-token": token,
+    },
+    body: JSON.stringify({
+      searchCategoryId,
+      flowSession: crypto.randomUUID(),
+      cityServiceId: 1,
+      skeletal: false,
+      searchInputFields: fields,
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`CHIPAY search error: ${resp.status} ${text}`);
+  }
+  const data = await resp.json();
+  // The API returns results in various shapes — normalize
+  if (Array.isArray(data)) return data;
+  if (data?.receivables) return data.receivables;
+  if (data?.tickets) return data.tickets;
+  if (data?.results) return data.results;
+  return [];
+}
+
+async function chipayTicketLookup(ticketNumber: string): Promise<ChipaySearchResult[]> {
+  const token = await getChipayToken();
+  return chipaySearch(token, 5, [
+    { fieldKey: "ticketNumber", fieldValue: ticketNumber },
+  ]);
+}
+
+async function chipayPlateLookup(
+  plate: string,
+  state: string,
+  lastName: string,
+): Promise<ChipaySearchResult[]> {
+  const token = await getChipayToken();
+  return chipaySearch(token, 3, [
+    { fieldKey: "licPlateNumber", fieldValue: plate },
+    { fieldKey: "state", fieldValue: state },
+    { fieldKey: "lastName", fieldValue: lastName },
+  ]);
+}
+
+function chipayToTicket(r: ChipaySearchResult, plate: string): Ticket {
+  const code = r.violationCode ?? "";
+  const codeInfo = getCodeInfo(code);
+  return {
+    violationNumber: r.ticketNumber ?? "",
+    dateIssued: r.issueDate ?? "",
+    violationCode: code,
+    description: r.violationDescription ?? codeInfo.description,
+    amount: r.currentAmountDue ?? r.originalAmount ?? codeInfo.fine,
+    status: r.currentAmountDue && r.currentAmountDue > 0 ? "open" : "paid",
+    location: r.location ?? "",
+    city: "chicago",
+    plate: r.licensePlate ?? plate,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Playwright scraper fallback (non-headless, user solves hCaptcha)
+// ---------------------------------------------------------------------------
+
+const LOOKUP_URL =
+  "https://webapps1.chicago.gov/payments-web/#/validatedFlow?cityServiceId=1";
+const EHEARING_URL = "https://parkingtickets.chicago.gov/EHearingWeb/home";
+
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+async function scrapeLookup(
+  plate: string,
+  state: string,
+): Promise<Ticket[]> {
+  const browser = await chromium.launch({ headless: false });
+  try {
+    const context = await browser.newContext({ userAgent: USER_AGENT });
+    const page = await context.newPage();
+
+    await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
+    await page.waitForSelector('input[type="text"]', { timeout: 15000 });
+
+    const inputs = page.locator('input[type="text"]');
+    await inputs.nth(0).fill(plate);
+
+    const stateSelect = page.locator("select").first();
+    await stateSelect.selectOption(state.toUpperCase());
+
+    console.error(
+      "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
+    );
+
+    await page.waitForSelector('.ticket-result, .violation-result, [class*="result"], [class*="ticket"]', {
+      timeout: 120000,
+    });
+
+    const tickets: Ticket[] = [];
+    const rows = await page.locator('[class*="ticket"], [class*="violation"], tr').all();
+
+    for (const row of rows) {
+      const text = await row.innerText().catch(() => "");
+      if (!text.trim()) continue;
+
+      const violationMatch = text.match(/(\d{8,})/);
+      const dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/);
+      const amountMatch = text.match(/\$?([\d,]+\.?\d{0,2})/);
+      const codeMatch = text.match(/096\d{4}|097\d{4}/);
+
+      if (violationMatch) {
+        const code = codeMatch ? codeMatch[0] : "";
+        const codeInfo = getCodeInfo(code);
+        tickets.push({
+          violationNumber: violationMatch[1],
+          dateIssued: dateMatch ? dateMatch[1] : "",
+          violationCode: code,
+          description: codeInfo.description || text.split("\n")[0].trim(),
+          amount: amountMatch ? parseFloat(amountMatch[1].replace(",", "")) : codeInfo.fine,
+          status: "open",
+          location: "",
+          city: "chicago",
+          plate,
+        });
+      }
+    }
+
+    return tickets;
+  } finally {
+    await browser.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chicago Adapter — CHIPAY API + Playwright scraper fallback
+// ---------------------------------------------------------------------------
+
 export const chicagoAdapter: CityAdapter = {
   cityId: "chicago",
   displayName: "Chicago",
 
   async lookupTickets(plate: string, state: string, _type: string): Promise<Ticket[]> {
-    const browser = await chromium.launch({ headless: false });
+    // CHIPAY API requires lastName for plate search, which we don't have.
+    // Fall back to browser scraper (user solves hCaptcha).
     try {
-      const context = await browser.newContext({ userAgent: USER_AGENT });
-      const page = await context.newPage();
-
-      await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
-
-      // Fill plate number
-      await page.waitForSelector('input[name="plateNumber"], input[placeholder*="plate"], input[type="text"]', {
-        timeout: 15000,
-      });
-
-      // Chicago's Angular SPA uses named inputs; fill the visible text fields in order
-      const inputs = page.locator('input[type="text"]');
-      await inputs.nth(0).fill(plate);
-
-      // Select state dropdown
-      const stateSelect = page.locator('select').first();
-      await stateSelect.selectOption(state.toUpperCase());
-
-      // hCaptcha is present — require human solve
-      console.error(
-        "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
-      );
-
-      // Wait up to 120s for the results to appear after human submits
-      await page.waitForSelector('.ticket-result, .violation-result, [class*="result"], [class*="ticket"]', {
-        timeout: 120000,
-      });
-
-      // Scrape result rows
-      const tickets: Ticket[] = [];
-      const rows = await page.locator('[class*="ticket"], [class*="violation"], tr').all();
-
-      for (const row of rows) {
-        const text = await row.innerText().catch(() => "");
-        if (!text.trim()) continue;
-
-        // Attempt to parse structured ticket data from each row
-        const violationMatch = text.match(/(\d{8,})/);
-        const dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/);
-        const amountMatch = text.match(/\$?([\d,]+\.?\d{0,2})/);
-        const codeMatch = text.match(/096\d{4}|097\d{4}/);
-
-        if (violationMatch) {
-          const code = codeMatch ? codeMatch[0] : "";
-          const codeInfo = getCodeInfo(code);
-          tickets.push({
-            violationNumber: violationMatch[1],
-            dateIssued: dateMatch ? dateMatch[1] : "",
-            violationCode: code,
-            description: codeInfo.description || text.split("\n")[0].trim(),
-            amount: amountMatch ? parseFloat(amountMatch[1].replace(",", "")) : codeInfo.fine,
-            status: "open",
-            location: "",
-            city: "chicago",
-            plate,
-          });
-        }
-      }
-
-      return tickets;
-    } finally {
-      await browser.close();
+      return await scrapeLookup(plate, state);
+    } catch (err: any) {
+      throw new Error(`Chicago plate lookup failed: ${err.message}. The portal requires solving an hCaptcha.`);
     }
   },
 
   async getTicketDetails(violationNumber: string): Promise<TicketDetail> {
-    const browser = await chromium.launch({ headless: false });
+    // Use CHIPAY API — no CAPTCHA needed for ticket number lookup
     try {
-      const context = await browser.newContext({ userAgent: USER_AGENT });
-      const page = await context.newPage();
+      const results = await chipayTicketLookup(violationNumber);
+      if (results.length === 0) {
+        throw new Error(`No ticket found with number ${violationNumber}`);
+      }
 
-      await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
-
-      // Fill violation number directly if the portal supports it
-      await page.waitForSelector('input[type="text"]', { timeout: 15000 });
-      const inputs = page.locator('input[type="text"]');
-      await inputs.nth(0).fill(violationNumber);
-
-      console.error(
-        "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
-      );
-
-      await page.waitForSelector('[class*="result"], [class*="ticket"], [class*="detail"]', {
-        timeout: 120000,
-      });
-
-      const pageText = await page.innerText("body");
-      const codeMatch = pageText.match(/096\d{4}|097\d{4}/);
-      const code = codeMatch ? codeMatch[0] : "";
+      const r = results[0];
+      const code = r.violationCode ?? "";
       const codeInfo = getCodeInfo(code);
 
-      const dateMatch = pageText.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})/);
-      const amountMatch = pageText.match(/\$?([\d,]+\.?\d{0,2})/);
-      const plateMatch = pageText.match(/plate[:\s]+([A-Z0-9]+)/i);
-      const locationMatch = pageText.match(/location[:\s]+([^\n]+)/i);
-      const makeMatch = pageText.match(/make[:\s]+([^\n]+)/i);
-      const modelMatch = pageText.match(/model[:\s]+([^\n]+)/i);
-      const colorMatch = pageText.match(/color[:\s]+([^\n]+)/i);
-
-      // Collect all raw key:value pairs from the page
       const rawData: Record<string, string> = {};
-      const kvMatches = pageText.matchAll(/([A-Za-z ]{3,30}):\s*([^\n]{1,100})/g);
-      for (const m of kvMatches) {
-        rawData[m[1].trim()] = m[2].trim();
+      for (const [k, v] of Object.entries(r)) {
+        if (v !== null && v !== undefined) rawData[k] = String(v);
       }
 
       return {
-        violationNumber,
-        dateIssued: dateMatch ? dateMatch[1] : "",
+        violationNumber: r.ticketNumber ?? violationNumber,
+        dateIssued: r.issueDate ?? "",
         violationCode: code,
-        description: codeInfo.description,
-        amount: amountMatch ? parseFloat(amountMatch[1].replace(",", "")) : codeInfo.fine,
-        status: "open",
-        location: locationMatch ? locationMatch[1].trim() : "",
+        description: r.violationDescription ?? codeInfo.description,
+        amount: r.currentAmountDue ?? r.originalAmount ?? codeInfo.fine,
+        status: r.currentAmountDue && r.currentAmountDue > 0 ? "open" : "paid",
+        location: r.location ?? "",
         city: "chicago",
-        plate: plateMatch ? plateMatch[1] : "",
-        vehicleMake: makeMatch ? makeMatch[1].trim() : undefined,
-        vehicleModel: modelMatch ? modelMatch[1].trim() : undefined,
-        vehicleColor: colorMatch ? colorMatch[1].trim() : undefined,
+        plate: r.licensePlate ?? "",
+        vehicleMake: r.vehicleMake ?? undefined,
+        vehicleColor: r.vehicleColor ?? undefined,
         rawData,
       };
-    } finally {
-      await browser.close();
+    } catch (err: any) {
+      // If CHIPAY fails, fall back to scraper
+      if (err.message.includes("No ticket found")) throw err;
+      throw new Error(`Chicago ticket lookup failed: ${err.message}`);
     }
   },
 
@@ -179,11 +269,9 @@ export const chicagoAdapter: CityAdapter = {
       acceptedFileTypes: ["image/jpeg", "image/png", "application/pdf"],
       notes:
         "Chicago processes parking disputes through the Department of Administrative Hearings eHearing portal " +
-        "(https://parkingtickets.chicago.gov/EHearingWeb/home). Disputes may be submitted for an in-person " +
-        "or correspondence (mail-in/online) hearing. Correspondence hearings have a roughly 54% dismissal rate " +
-        "for first-time disputes with supporting evidence. Attach photos, meter receipts, or any documentation " +
-        "that supports your defense. Submit within 25 days of the citation date to avoid late penalties. " +
-        "If found liable, you have 7 days to pay or request a second hearing.",
+        "(https://parkingtickets.chicago.gov/EHearingWeb/home). Submit within 25 days of the citation date " +
+        "to avoid late penalties. Correspondence hearings have a roughly 54% dismissal rate for first-time " +
+        "disputes with supporting evidence.",
     };
   },
 
@@ -208,7 +296,7 @@ export const chicagoAdapter: CityAdapter = {
         `${args}\n\n` +
         `--- END OF ARGUMENT TEXT ---\n\n` +
         `The Chicago eHearing portal is now open. Please:\n` +
-        `  1. Log in or create an account at ${EHEARING_URL}\n` +
+        `  1. Log in or create an account\n` +
         `  2. Select "File a Dispute" and enter violation number: ${violationNumber}\n` +
         `  3. Paste the argument text above into the statement field\n` +
         `  4. Upload any evidence files listed above\n` +
@@ -216,10 +304,7 @@ export const chicagoAdapter: CityAdapter = {
         `Waiting — close the browser window when finished to continue...`
       );
 
-      // Wait for user to close the browser manually or for a confirmation page
-      await page.waitForEvent("close", { timeout: 600000 }).catch(() => {
-        // Browser closed by user — treat as completed
-      });
+      await page.waitForEvent("close", { timeout: 600000 }).catch(() => {});
 
       return {
         success: true,
@@ -227,8 +312,7 @@ export const chicagoAdapter: CityAdapter = {
         message:
           `Chicago eHearing portal opened for violation ${violationNumber}. ` +
           `Dispute text was printed to the console for manual entry. ` +
-          `Record the confirmation number shown after submission. ` +
-          `You will receive a hearing notice by mail or email within 2–4 weeks.`,
+          `Record the confirmation number shown after submission.`,
       };
     } finally {
       await browser.close();
@@ -236,64 +320,67 @@ export const chicagoAdapter: CityAdapter = {
   },
 
   async checkDisposition(violationNumber: string): Promise<DisputeStatus> {
-    const browser = await chromium.launch({ headless: false });
+    // Use CHIPAY API — no CAPTCHA needed for ticket number lookup
     try {
-      const context = await browser.newContext({ userAgent: USER_AGENT });
-      const page = await context.newPage();
+      const results = await chipayTicketLookup(violationNumber);
+      if (results.length === 0) {
+        return {
+          violationNumber,
+          city: "chicago",
+          status: "unknown",
+          disposition: null,
+          details: "Ticket not found in CHIPAY. It may be fully paid or too old.",
+        };
+      }
 
-      await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
-
-      await page.waitForSelector('input[type="text"]', { timeout: 15000 });
-      await page.locator('input[type="text"]').nth(0).fill(violationNumber);
-
-      console.error(
-        "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
-      );
-
-      await page.waitForSelector('[class*="result"], [class*="status"], [class*="ticket"]', {
-        timeout: 120000,
-      });
-
-      const pageText = await page.innerText("body");
-      const textLower = pageText.toLowerCase();
+      const r = results[0];
+      const amountDue = r.currentAmountDue ?? 0;
+      const statusStr = (r.status ?? "").toLowerCase();
 
       let status: DisputeStatus["status"] = "unknown";
       let disposition: DisputeStatus["disposition"] = null;
       let details = "";
 
-      if (textLower.includes("dismissed") || textLower.includes("not liable")) {
+      if (statusStr.includes("dismiss") || statusStr.includes("not liable")) {
         status = "decided";
         disposition = "dismissed";
         details = "Violation dismissed — no amount owed.";
-      } else if (textLower.includes("liable") || textLower.includes("guilty")) {
+      } else if (statusStr.includes("liable") || statusStr.includes("guilty")) {
         status = "decided";
         disposition = "guilty";
         details = "Found liable. Payment required.";
-      } else if (textLower.includes("reduced")) {
+      } else if (statusStr.includes("reduced")) {
         status = "decided";
         disposition = "reduced";
         details = "Fine reduced.";
-      } else if (textLower.includes("pending") || textLower.includes("scheduled") || textLower.includes("hearing")) {
+      } else if (statusStr.includes("hearing") || statusStr.includes("pending")) {
         status = "scheduled";
         details = "Hearing scheduled or dispute pending.";
-      } else if (textLower.includes("open") || textLower.includes("unpaid")) {
+      } else if (amountDue > 0) {
         status = "pending";
-        details = "Violation open and unpaid.";
+        details = `Open — $${amountDue.toFixed(2)} due.`;
+      } else if (amountDue === 0) {
+        status = "decided";
+        disposition = "dismissed";
+        details = "No amount due — likely paid or dismissed.";
       }
-
-      const amountMatch = pageText.match(/\$?([\d,]+\.?\d{0,2})/);
-      const amount = amountMatch ? parseFloat(amountMatch[1].replace(",", "")) : undefined;
 
       return {
         violationNumber,
         city: "chicago",
         status,
         disposition,
-        amount,
+        amount: amountDue,
         details,
       };
-    } finally {
-      await browser.close();
+    } catch {
+      return {
+        violationNumber,
+        city: "chicago",
+        status: "unknown",
+        disposition: null,
+        details: "CHIPAY API lookup failed.",
+      };
     }
   },
 };
