@@ -1,6 +1,24 @@
 # Ticket Fighter
 
-An MCP server that automates parking ticket detection, evidence gathering, and dispute preparation across multiple US cities.
+An MCP server that automates parking ticket detection, evidence gathering, and dispute preparation across multiple US cities. Runs fully in the cloud via the [@ticket_fighter MMP bot](https://tf.mmp.chat) or locally as a stdio MCP server.
+
+## MMP Bot
+
+DM **@ticket_fighter** on [MMP](https://mmp.chat) to use Ticket Fighter through any AI assistant. The bot runs on Railway and handles everything headlessly.
+
+**Landing page:** [tf.mmp.chat](https://tf.mmp.chat)
+
+**Commands:**
+- `add ABC1234 NY nyc` — Monitor a plate
+- `check` — Scan for tickets now
+- `analyze 1234567 nyc` — Evidence & defense strategy
+- `dispute 1234567 nyc` — Generate dispute
+- `submit 1234567 nyc` — Submit to city portal
+- `status 1234567 nyc` — Check outcome
+- `gmail` — Connect Gmail for decision tracking
+- `help` — Show all commands
+
+Bot source: [`/ticket-fighter-bot`](../ticket-fighter-bot/)
 
 ## Supported Cities (24)
 
@@ -32,11 +50,11 @@ An MCP server that automates parking ticket detection, evidence gathering, and d
 | **Sacramento** | DS Payments | Duncan appeal portal |
 | **New Orleans** | DS Payments | Duncan appeal portal |
 
-### CAPTCHA (user solves in browser)
+### CAPTCHA (auto-solved via 2Captcha, or user solves in browser)
 
 | City | Platform | CAPTCHA Type | Dispute Method |
 |------|----------|-------------|---------------|
-| **NYC** | CityPay | reCAPTCHA (invisible) | HBW online hearing |
+| **NYC** | CityPay | reCAPTCHA v2 | HBW online hearing |
 | **Chicago** | CHIPAY | hCaptcha | eHearing |
 | **Washington DC** | eTIMS | Custom image | DC DMV online |
 | **San Francisco** | eTIMS | Custom image | SFMTA citations |
@@ -51,6 +69,19 @@ An MCP server that automates parking ticket detection, evidence gathering, and d
 - **RMC Pay** — 50+ US cities use this platform. Add any with: `createRmcPayAdapter({ cityId, displayName, subdomain })`
 - **DS Payments** — 25+ cities. Add with: `createDsPaymentsAdapter({ cityId, displayName, citySlug, appealSlug })`
 - **eTIMS** — 10+ major cities. Add with: `createEtimsAdapter({ cityId, displayName, cityPath, subdomain })`
+
+## Cloud Operation
+
+Ticket Fighter runs fully headless in the cloud with these env vars:
+
+| Var | Purpose |
+|-----|---------|
+| `CAPTCHA_API_KEY` | 2Captcha API key — auto-solves reCAPTCHA v2 (NYC) and hCaptcha (Chicago) |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID — enables Gmail API for decision tracking |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `GOOGLE_REDIRECT_URI` | OAuth callback URL (e.g. `https://tf.mmp.chat/auth/gmail/callback`) |
+
+Without these, the tools fall back to headed browser mode (local use only).
 
 ## ChatGPT App
 
@@ -116,7 +147,7 @@ Submit a previewed dispute. Requires explicit confirmation.
 Check dispute status via city portal or Gmail search for decision emails.
 
 ### `setup_gmail`
-Authenticate Gmail for decision email monitoring. Opens a browser for manual login; saves session for headless reuse.
+Connect Gmail for decision email monitoring. With Google OAuth configured, returns an authorization URL. Without it, opens a browser for manual login.
 
 ## Adding a New City
 
