@@ -4,6 +4,14 @@ An MCP server that automates parking ticket detection, evidence gathering, and d
 
 ## Supported Cities (24)
 
+### Open Data API (no browser needed)
+
+| City | API | Fallback |
+|------|-----|----------|
+| **NYC** | NYC Open Data (SODA `nc67-uf89`) | CityPay scraper if data >30 days stale |
+| **San Francisco** | SF Open Data (SODA `ab4h-6ztd`) | eTIMS scraper if data >30 days stale |
+| **Chicago** | CHIPAY JSON API (ticket # lookups) | Browser scraper for plate searches (hCaptcha) |
+
 ### No CAPTCHA (fully automatable)
 
 | City | Platform | Dispute Method |
@@ -44,15 +52,37 @@ An MCP server that automates parking ticket detection, evidence gathering, and d
 - **DS Payments** — 25+ cities. Add with: `createDsPaymentsAdapter({ cityId, displayName, citySlug, appealSlug })`
 - **eTIMS** — 10+ major cities. Add with: `createEtimsAdapter({ cityId, displayName, cityPath, subdomain })`
 
+## ChatGPT App
+
+Ticket Fighter includes a widget UI for ChatGPT. All tools render inline results — a dashboard for `check_tickets`, detail views for `analyze_ticket`, dispute previews, and status badges.
+
+To rebuild the widget: `cd app && npm install && npm run build`
+
 ## Setup
 
 ```bash
 npm install
 npx playwright install chromium
+cd app && npm install && npm run build && cd ..
 npm run build
 ```
 
-Add to your Claude Code MCP config (`.mcp.json`):
+### Claude Code (`.mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "ticket-fighter": {
+      "command": "node",
+      "args": ["/path/to/ticket-fighter/dist/index.js"]
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
