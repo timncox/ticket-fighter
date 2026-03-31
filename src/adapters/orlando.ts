@@ -7,7 +7,7 @@ import type {
   DisputeConfirmation,
   DisputeStatus,
 } from "./types.js";
-import orlandoCodes from "../codes/orlando-codes.json";
+import orlandoCodes from "../codes/orlando-codes.json" with { type: "json" };
 
 const LOOKUP_URL =
   "https://www.citationprocessingcenter.com/citizen-search-citation.aspx";

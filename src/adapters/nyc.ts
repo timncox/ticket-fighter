@@ -2,6 +2,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { chromium } from "playwright";
+import {
+  isCaptchaSolverEnabled,
+  solveRecaptchaV2,
+  extractRecaptchaSiteKey,
+  injectRecaptchaToken,
+} from "../captcha-solver.js";
 import type {
   CityAdapter,
   Ticket,
@@ -158,7 +164,8 @@ async function scrapeCityPay(
   state: string,
   type: string
 ): Promise<Ticket[]> {
-  const browser = await chromium.launch({ headless: false });
+  const headless = isCaptchaSolverEnabled();
+  const browser = await chromium.launch({ headless });
   try {
     const context = await browser.newContext({
       userAgent: USER_AGENT,
@@ -188,12 +195,22 @@ async function scrapeCityPay(
     await chosenSelect(page, "#PLATE_STATE", state);
     await chosenSelect(page, "#PLATE_TYPE", type);
 
-    // Submit — user will need to solve reCAPTCHA in the visible browser
+    // Solve CAPTCHA automatically if solver is available
+    if (headless) {
+      const siteKey = await extractRecaptchaSiteKey(page);
+      if (siteKey) {
+        const token = await solveRecaptchaV2(LOOKUP_URL, siteKey);
+        await injectRecaptchaToken(page, token);
+        await sleep(500);
+      }
+    }
+
+    // Submit
     await page.locator("button[type='submit']").first().evaluate(
       (btn: HTMLButtonElement) => btn.click()
     );
 
-    // Wait for results — give user time to solve CAPTCHA
+    // Wait for results — if headless, CAPTCHA is already solved; if headed, user solves manually
     await page.waitForSelector("table tbody tr, .no-results, .error-message", {
       timeout: 120_000,
     }).catch(() => {});

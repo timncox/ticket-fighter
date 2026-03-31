@@ -2,11 +2,31 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { chromium } from "playwright";
 import { getAuthDir, getDecisionsDir } from "./config.js";
+import {
+  isGmailApiEnabled,
+  getAuthUrl,
+  searchGmailApi,
+} from "./gmail-api.js";
 
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
+/**
+ * Set up Gmail authentication.
+ * - If Gmail API is configured (GOOGLE_CLIENT_ID + SECRET), returns an OAuth URL.
+ * - Otherwise, launches a visible browser for manual login (local-only).
+ */
 export async function setupGmailAuth(): Promise<string> {
+  if (isGmailApiEnabled()) {
+    const url = getAuthUrl();
+    return (
+      `Gmail API mode enabled. Visit this URL to authorize:\n\n${url}\n\n` +
+      `After authorizing, you'll receive a code. ` +
+      `If using the MMP bot, the callback handles it automatically.`
+    );
+  }
+
+  // Fallback: Playwright browser login (requires display)
   const stateFile = path.join(getAuthDir(), "state.json");
 
   const browser = await chromium.launch({ headless: false });
@@ -16,7 +36,6 @@ export async function setupGmailAuth(): Promise<string> {
 
     await page.goto("https://mail.google.com/");
 
-    // Wait up to 120 seconds for the user to complete login (inbox URL detected)
     await page.waitForURL(/mail\.google\.com\/mail\/u\/\d+\/#inbox/, {
       timeout: 120_000,
     });
@@ -34,9 +53,19 @@ export interface GmailSearchResult {
   downloadedPdfs: string[];
 }
 
+/**
+ * Search Gmail for decision emails.
+ * Uses Gmail API if configured, otherwise falls back to Playwright scraping.
+ */
 export async function searchGmailForDecisions(
   query: string
 ): Promise<GmailSearchResult> {
+  // Prefer Gmail API if configured
+  if (isGmailApiEnabled()) {
+    return searchGmailApi(query);
+  }
+
+  // Fallback: Playwright scraping (requires prior setupGmailAuth via browser)
   const stateFile = path.join(getAuthDir(), "state.json");
 
   if (!fs.existsSync(stateFile)) {
@@ -58,19 +87,16 @@ export async function searchGmailForDecisions(
     const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
     await page.goto(searchUrl, { waitUntil: "networkidle" });
 
-    // Check if auth expired — redirected to accounts.google.com
     if (page.url().includes("accounts.google.com")) {
       throw new Error(
         "Gmail session expired — run setup_gmail to re-authenticate"
       );
     }
 
-    // Wait for the email list to appear
     await page.waitForSelector("table.F.cf.zt, div[role='main']", {
       timeout: 15_000,
     });
 
-    // Scrape the email list rows
     const emails = await page.evaluate(() => {
       const results: {
         subject: string;
@@ -79,7 +105,6 @@ export async function searchGmailForDecisions(
         snippet: string;
       }[] = [];
 
-      // Gmail renders email rows as <tr> elements with class "zA"
       const rows = document.querySelectorAll("tr.zA");
       rows.forEach((row) => {
         const fromEl = row.querySelector(".yW span[email], .yW span[name]");
@@ -104,7 +129,6 @@ export async function searchGmailForDecisions(
       return results;
     });
 
-    // Click into the top 5 results to look for PDF attachments
     const downloadedPdfs: string[] = [];
     const rowHandles = await page.$$("tr.zA");
     const topRows = rowHandles.slice(0, 5);
@@ -114,29 +138,20 @@ export async function searchGmailForDecisions(
         await row.click();
         await page.waitForLoadState("networkidle");
 
-        // Check if auth expired mid-session
         if (page.url().includes("accounts.google.com")) {
           throw new Error(
             "Gmail session expired — run setup_gmail to re-authenticate"
           );
         }
 
-        // Look for PDF attachment download links/buttons
-        // Gmail shows attachments as elements with aria-label containing the filename
         const attachmentLinks = await page.$$(
           "[data-tooltip*='.pdf'], [aria-label*='.pdf'], [download*='.pdf']"
         );
-
-        // Also look for the attachment chip that Gmail uses
-        const attachmentChips = await page.$$(
-          "span.aZo, div.aQH"
-        );
-
+        const attachmentChips = await page.$$("span.aZo, div.aQH");
         const allAttachmentEls = [...attachmentLinks, ...attachmentChips];
 
         for (const attachEl of allAttachmentEls) {
           try {
-            // Check if this element is related to a PDF
             const ariaLabel = await attachEl.getAttribute("aria-label") || "";
             const tooltip = await attachEl.getAttribute("data-tooltip") || "";
             const text = await attachEl.textContent() || "";
@@ -148,8 +163,6 @@ export async function searchGmailForDecisions(
 
             if (!isPdf) continue;
 
-            // Set up download listener and click the download button
-            // Gmail's download button is typically inside the attachment chip
             const downloadBtn = await attachEl.$("a[href*='attachment'], a[download]");
             const clickTarget = downloadBtn || attachEl;
 
@@ -168,22 +181,15 @@ export async function searchGmailForDecisions(
           }
         }
 
-        // Go back to the search results
         await page.goBack({ waitUntil: "networkidle" });
 
-        // Check if auth expired after going back
         if (page.url().includes("accounts.google.com")) {
           throw new Error(
             "Gmail session expired — run setup_gmail to re-authenticate"
           );
         }
       } catch (err: any) {
-        if (
-          err.message?.includes("Gmail session expired")
-        ) {
-          throw err;
-        }
-        // Skip emails that fail to open/process
+        if (err.message?.includes("Gmail session expired")) throw err;
       }
     }
 

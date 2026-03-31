@@ -2,6 +2,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { chromium } from "playwright";
+import {
+  isCaptchaSolverEnabled,
+  solveHCaptcha,
+  extractHCaptchaSiteKey,
+  injectHCaptchaToken,
+} from "../captcha-solver.js";
 import type {
   CityAdapter,
   Ticket,
@@ -147,7 +153,8 @@ async function scrapeLookup(
   plate: string,
   state: string,
 ): Promise<Ticket[]> {
-  const browser = await chromium.launch({ headless: false });
+  const headless = isCaptchaSolverEnabled();
+  const browser = await chromium.launch({ headless });
   try {
     const context = await browser.newContext({ userAgent: USER_AGENT });
     const page = await context.newPage();
@@ -161,9 +168,21 @@ async function scrapeLookup(
     const stateSelect = page.locator("select").first();
     await stateSelect.selectOption(state.toUpperCase());
 
-    console.error(
-      "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
-    );
+    // Solve CAPTCHA automatically if solver is available
+    if (headless) {
+      const siteKey = await extractHCaptchaSiteKey(page);
+      if (siteKey) {
+        const token = await solveHCaptcha(LOOKUP_URL, siteKey);
+        await injectHCaptchaToken(page, token);
+        // Click submit after injecting token
+        const submitBtn = page.locator("button[type='submit'], input[type='submit']").first();
+        if (await submitBtn.count() > 0) await submitBtn.click();
+      }
+    } else {
+      console.error(
+        "[ticket-fighter] CHICAGO: hCaptcha detected. Please solve the CAPTCHA in the browser window, then press Submit. Waiting up to 120 seconds..."
+      );
+    }
 
     await page.waitForSelector('.ticket-result, .violation-result, [class*="result"], [class*="ticket"]', {
       timeout: 120000,
