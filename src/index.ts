@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
+import cors from "cors";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   loadConfig,
@@ -363,8 +367,69 @@ registerAppTool(
 );
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
+
+  if (PORT) {
+    // HTTP mode — Streamable HTTP transport for remote access
+    const app = express();
+    app.use(cors());
+    app.use(express.json());
+
+    // Session management
+    const sessions = new Map<string, StreamableHTTPServerTransport>();
+
+    app.all("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (sessionId && sessions.has(sessionId)) {
+        const transport = sessions.get(sessionId)!;
+        await transport.handleRequest(req, res);
+        return;
+      }
+
+      if (req.method === "GET") {
+        // SSE connection for existing session
+        res.status(400).json({ error: "Invalid or missing session ID" });
+        return;
+      }
+
+      // New session
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions.set(id, transport);
+        },
+      });
+
+      transport.onclose = () => {
+        const id = [...sessions.entries()].find(([, t]) => t === transport)?.[0];
+        if (id) sessions.delete(id);
+      };
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    });
+
+    // Serve static files for the landing page / dashboard
+    const path = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const publicDir = path.join(__dirname, "..", "app", "dist");
+    app.use(express.static(publicDir));
+
+    app.get("/health", (_req, res) => {
+      res.json({ status: "ok", service: "ticket-fighter", timestamp: new Date().toISOString() });
+    });
+
+    app.listen(PORT, () => {
+      console.log(`ticket-fighter MCP server (HTTP) listening on :${PORT}`);
+      console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+    });
+  } else {
+    // Stdio mode — for local subprocess usage
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
 }
 
 main().catch(console.error);
