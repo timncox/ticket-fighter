@@ -61,6 +61,11 @@ registerAdapter(oaklandAdapter);
 registerAdapter(santaMonicaAdapter);
 registerAdapter(atlantaAdapter);
 
+// Build city enum from registered adapters
+import { getAllAdapters } from "./adapters/registry.js";
+const SUPPORTED_CITIES = getAllAdapters().map((a) => a.cityId) as [string, ...string[]];
+const cityEnum = z.enum(SUPPORTED_CITIES);
+
 const WIDGET_URI = "ui://ticket-fighter/widget.html";
 let widgetHtml: string;
 try {
@@ -83,7 +88,7 @@ server.registerTool(
       number: z.string().optional().describe("Plate number (for add/remove)"),
       state: z.string().optional().describe("Plate state, e.g. NY, IL, FL (for add)"),
       type: z.string().optional().describe("Plate type, e.g. PAS, COM (for add)"),
-      city: z.enum(["nyc", "chicago", "orlando"]).optional().describe("City (for add/remove)"),
+      city: cityEnum.optional().describe("City (for add/remove)"),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     _meta: { ui: { resourceUri: WIDGET_URI } },
@@ -127,7 +132,7 @@ server.registerTool(
     description: "Check for open parking tickets by scraping city violation portals. Checks all saved plates if no plate specified.",
     inputSchema: {
       plate: z.string().optional().describe("Specific plate number to check"),
-      city: z.enum(["nyc", "chicago", "orlando"]).optional().describe("Filter to one city"),
+      city: cityEnum.optional().describe("Filter to one city"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     _meta: { ui: { resourceUri: WIDGET_URI } },
@@ -174,7 +179,7 @@ server.registerTool(
     description: "Gather evidence for a specific violation: ticket details, registration cross-ref, Street View imagery, traffic rule lookup, common defenses, and past dispute history",
     inputSchema: {
       violation_number: z.string().describe("The violation/ticket number"),
-      city: z.enum(["nyc", "chicago", "orlando"]).describe("Which city issued the ticket"),
+      city: cityEnum.describe("Which city issued the ticket"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     _meta: { ui: { resourceUri: WIDGET_URI } },
@@ -202,7 +207,7 @@ server.registerTool(
     description: "Format dispute arguments into city-specific form structure. Returns a preview — does NOT submit.",
     inputSchema: {
       violation_number: z.string().describe("The violation/ticket number"),
-      city: z.enum(["nyc", "chicago", "orlando"]).describe("Which city"),
+      city: cityEnum.describe("Which city"),
       arguments: z.string().describe("The dispute text/arguments to submit"),
       evidence_paths: z.array(z.string()).optional().describe("File paths to photos/documents to attach"),
     },
@@ -237,7 +242,7 @@ server.registerTool(
     description: "Submit a previously previewed dispute. Requires confirmed=true as a safety gate.",
     inputSchema: {
       violation_number: z.string().describe("The violation/ticket number"),
-      city: z.enum(["nyc", "chicago", "orlando"]).describe("Which city"),
+      city: cityEnum.describe("Which city"),
       arguments: z.string().describe("The dispute text to submit"),
       evidence_paths: z.array(z.string()).optional().describe("File paths to evidence"),
       confirmed: z.boolean().describe("Must be true to submit. Safety gate."),
@@ -272,7 +277,7 @@ server.registerTool(
     description: "Check dispute status via city portal scrape or Gmail search for decision emails",
     inputSchema: {
       violation_number: z.string().optional().describe("Violation number to check on city portal"),
-      city: z.enum(["nyc", "chicago", "orlando"]).optional().describe("City (required with violation_number)"),
+      city: cityEnum.optional().describe("City (required with violation_number)"),
       gmail_search: z.string().optional().describe("Search Gmail for decision emails"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
