@@ -176,22 +176,32 @@ async function scrapeCityPay(
     await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
     await sleep(3000);
 
-    // Click the License Plate tab
+    // Switch to License Plate tab. The page ships both tab panels in the DOM,
+    // so we MUST click the tab AND scope every subsequent selector to the
+    // License Plate form — otherwise "button[type=submit]" picks up the
+    // Parking Violation form's submit and triggers "Violation number is empty".
     const plateTab = page.locator(
-      "button:has-text('License Plate'), a:has-text('License Plate'), [role='tab']:has-text('License Plate')"
+      "a:has-text('Search By License Plate'), button:has-text('Search By License Plate'), [role='tab']:has-text('Search By License Plate')"
     );
-    if (await plateTab.count() > 0) {
-      await plateTab.first().click();
-      await sleep(1000);
+    if (await plateTab.count() === 0) {
+      throw new Error("CityPay: could not find 'Search By License Plate' tab");
+    }
+    await plateTab.first().click();
+    await sleep(1000);
+
+    // Scope to the plate form by finding an input that's clearly plate-specific,
+    // then walking up to its enclosing <form>. Everything below uses plateForm.
+    const plateInput = page.locator(
+      "input[name*='plate' i], input[id*='plate' i], input[placeholder*='plate' i]"
+    ).first();
+    const plateForm = plateInput.locator("xpath=ancestor::form[1]");
+    if (await plateForm.count() === 0) {
+      throw new Error("CityPay: could not locate plate lookup form");
     }
 
-    // Fill plate number
-    const plateInput = page.locator(
-      "input[name*='plate'], input[id*='plate'], input[placeholder*='plate' i], input[placeholder*='Plate' i]"
-    );
-    await plateInput.first().fill(plate);
+    await plateInput.fill(plate);
 
-    // Select state and type via Chosen dropdowns
+    // State and type dropdowns (Chosen widgets live inside the plate form)
     await chosenSelect(page, "#PLATE_STATE", state);
     await chosenSelect(page, "#PLATE_TYPE", type);
 
@@ -205,10 +215,15 @@ async function scrapeCityPay(
       }
     }
 
-    // Submit
-    await page.locator("button[type='submit']").first().evaluate(
-      (btn: HTMLButtonElement) => btn.click()
-    );
+    // Submit — scoped to the plate form so we can't click the parking-violation
+    // tab's submit button by accident.
+    const submitBtn = plateForm.locator(
+      "button[type='submit'], input[type='submit']"
+    ).first();
+    if (await submitBtn.count() === 0) {
+      throw new Error("CityPay: could not find submit button in plate form");
+    }
+    await submitBtn.evaluate((btn: HTMLElement) => btn.click());
 
     // Wait for results — if headless, CAPTCHA is already solved; if headed, user solves manually
     await page.waitForSelector("table tbody tr, .no-results, .error-message", {
@@ -351,9 +366,9 @@ export const nycAdapter: CityAdapter = {
         county: v.county ?? "",
         violation_status: v.violation_status ?? "",
         judgment_entry_date: v.judgment_entry_date ?? "",
-        summons_image_url: v.summons_image?.url ?? "",
+        summons_image_viewer_url: v.summons_image?.url ?? "",
       },
-      photoUrls: v.summons_image?.url ? [v.summons_image.url] : [],
+      photoUrls: [],
     };
   },
 
@@ -371,7 +386,7 @@ export const nycAdapter: CityAdapter = {
       ],
       maxArgumentLength: 5000,
       maxEvidenceFiles: 5,
-      acceptedFileTypes: ["pdf", "jpg", "jpeg", "png"],
+      acceptedFileTypes: ["pdf", "jpg", "jpeg", "tiff", "bmp", "gif"],
       notes:
         "NYC parking disputes are submitted to the NYC Department of Finance (DOF) " +
         "via the Online Dispute Portal. You have 30 days from the violation date to " +

@@ -149,6 +149,31 @@ Check dispute status via city portal or Gmail search for decision emails.
 ### `setup_gmail`
 Connect Gmail for decision email monitoring. With Google OAuth configured, returns an authorization URL. Without it, opens a browser for manual login.
 
+## Scripts (NYC submission helpers)
+
+NYC's `submit_dispute` MCP tool intentionally throws — DOF submissions require the user in the loop (evidence upload, personal info, penalty-of-perjury attestation). Two scripts in `scripts/` handle the flow:
+
+### `fetch-summons-citypay.mjs <violation>...`
+Launches a headed Chromium, walks through CityPay's "Search by Parking Violation" tab for each violation, saves the officer's summons image and CityPay results page to `~/.ticket-fighter/decisions/`. User solves any reCAPTCHA; script auto-detects solve (token present OR form navigation) and continues.
+
+```bash
+node scripts/fetch-summons-citypay.mjs 9270466449 4051701815 8998315609
+```
+
+### `submit-dispute-nyc.mjs <violation>`
+Polling-fill for NYC DOF's "Dispute by Web" form. Opens https://www.nyc.gov/site/finance/vehicles/dispute-web.page; user clicks "Dispute by Web" (opens a new tab); script watches **all tabs and iframes** in the context; every 3 seconds it fills any form field it recognizes (name, address, city, zip, email, plate, violation #, argument textarea) and attaches evidence files to any `input[type=file]`. Stops at the final Review/Submit page — user reviews and clicks submit manually.
+
+Configure at the top of the script:
+- `RESPONDENT` — name, address, email
+- `EVIDENCE` — map of violation # → array of file paths
+- Dispute argument text is loaded from `~/.ticket-fighter/decisions/dispute-<violation>.txt`
+
+```bash
+node scripts/submit-dispute-nyc.mjs 9270466449
+```
+
+**DOF-accepted file types:** PDF, JPG/JPEG, TIFF, BMP, GIF. **Not PNG** — convert with `sips -s format jpeg in.png --out out.jpg` before listing in `EVIDENCE`.
+
 ## Adding a New City
 
 **If the city uses RMC Pay** (check if `{cityname}.rmcpay.com` loads their portal):
