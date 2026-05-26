@@ -10,6 +10,7 @@ import {
 } from "../captcha-solver.js";
 import type {
   CityAdapter,
+  Plate,
   Ticket,
   TicketDetail,
   DisputeFormFields,
@@ -279,6 +280,176 @@ async function scrapeCityPay(
   }
 }
 
+async function scrapeCityPayDetail(
+  plate: string,
+  state: string,
+  type: string,
+  violationNumber: string
+): Promise<TicketDetail | null> {
+  const headless = isCaptchaSolverEnabled();
+  const browser = await chromium.launch({ headless });
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      locale: "en-US",
+    });
+    const page = await context.newPage();
+
+    await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
+    await sleep(3000);
+
+    const plateTab = page.locator(
+      "a:has-text('Search By License Plate'), button:has-text('Search By License Plate'), [role='tab']:has-text('Search By License Plate')"
+    );
+    if (await plateTab.count() === 0) {
+      throw new Error("CityPay: could not find 'Search By License Plate' tab");
+    }
+    await plateTab.first().click();
+    await sleep(1000);
+
+    const plateInput = page.locator(
+      "input[name*='plate' i], input[id*='plate' i], input[placeholder*='plate' i]"
+    ).first();
+    const plateForm = plateInput.locator("xpath=ancestor::form[1]");
+    if (await plateForm.count() === 0) {
+      throw new Error("CityPay: could not locate plate lookup form");
+    }
+    await plateInput.fill(plate);
+    await chosenSelect(page, "#PLATE_STATE", state);
+    await chosenSelect(page, "#PLATE_TYPE", type);
+
+    if (headless) {
+      const siteKey = await extractRecaptchaSiteKey(page);
+      if (siteKey) {
+        const token = await solveRecaptchaV2(LOOKUP_URL, siteKey);
+        await injectRecaptchaToken(page, token);
+        await sleep(500);
+      }
+    }
+
+    const submitBtn = plateForm.locator(
+      "button[type='submit'], input[type='submit']"
+    ).first();
+    if (await submitBtn.count() === 0) {
+      throw new Error("CityPay: could not find submit button in plate form");
+    }
+    await submitBtn.evaluate((btn: HTMLElement) => btn.click());
+
+    await page.waitForSelector("table tbody tr, .no-results, .error-message", {
+      timeout: 120_000,
+    }).catch(() => {});
+    await sleep(3000);
+
+    // Find the row whose first cell matches the requested violation number.
+    const targetRow = page.locator(
+      `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
+    ).first();
+    if (await targetRow.count() === 0) {
+      return null;
+    }
+
+    // Capture the summary row's cell texts as a baseline.
+    const cells = targetRow.locator("td, [role='cell']");
+    const cellCount = await cells.count();
+    const cellTexts: string[] = [];
+    for (let j = 0; j < cellCount; j++) {
+      cellTexts.push((await cells.nth(j).innerText()).trim());
+    }
+
+    const dateIssued = cellTexts[1] ?? "";
+    const violationCode = cellTexts[2] ?? "";
+    const description =
+      cellTexts[3] ??
+      NYC_CODES[violationCode]?.description ??
+      "Unknown violation";
+    const amount = parseFloat((cellTexts[4] ?? "0").replace(/[^0-9.]/g, "")) || 0;
+    const status = cellTexts[5] ?? "unknown";
+
+    // Try to open the detail view by clicking the first link or button in the row.
+    const detailKv: Record<string, string> = {};
+    const clickable = targetRow.locator("a, button").first();
+    if (await clickable.count() > 0) {
+      try {
+        await clickable.click();
+        await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
+        await sleep(1500);
+
+        // CityPay's detail panel typically renders label/value pairs as
+        // <dt>/<dd>, <th>/<td>, or "Label: Value" text. Probe each.
+        const dts = page.locator("dt");
+        const dtCount = await dts.count();
+        for (let i = 0; i < dtCount; i++) {
+          const label = (await dts.nth(i).innerText()).trim().replace(/:$/, "");
+          const value = await dts.nth(i).locator("xpath=following-sibling::dd[1]").innerText().catch(() => "");
+          if (label && value) detailKv[label] = value.trim();
+        }
+        const labelCells = page.locator("th, td.label, td.field-label");
+        const lcCount = await labelCells.count();
+        for (let i = 0; i < lcCount; i++) {
+          const label = (await labelCells.nth(i).innerText()).trim().replace(/:$/, "");
+          const value = await labelCells.nth(i).locator("xpath=following-sibling::td[1]").innerText().catch(() => "");
+          if (label && value && !detailKv[label]) detailKv[label] = value.trim();
+        }
+      } catch {
+        // Detail panel didn't open — fall through to row-only data.
+      }
+    }
+
+    const find = (...keys: string[]): string => {
+      for (const k of keys) {
+        for (const [label, value] of Object.entries(detailKv)) {
+          if (label.toLowerCase().includes(k.toLowerCase())) return value;
+        }
+      }
+      return "";
+    };
+
+    const street = find("street name", "street", "intersecting", "house number", "location");
+    const violationTime = find("violation time", "issue time", "time");
+    const vehicleBody = find("body type", "vehicle body");
+    const vehicleMake = find("make", "vehicle make");
+    const vehicleColor = find("color");
+    const precinct = find("precinct");
+    const county = find("county", "county code");
+    const issuingAgency = find("agency", "issuing");
+
+    const locationParts = [street, precinct ? `Precinct ${precinct}` : "", county]
+      .filter(Boolean);
+    const location = locationParts.length > 0
+      ? locationParts.join(", ")
+      : (cellTexts[6] ?? "");
+
+    return {
+      violationNumber,
+      dateIssued,
+      violationCode,
+      description,
+      amount,
+      status,
+      location,
+      city: "nyc",
+      plate,
+      vehicleMake: vehicleMake || undefined,
+      vehicleColor: vehicleColor || undefined,
+      rawData: {
+        street,
+        violation_time: violationTime,
+        body_type: vehicleBody,
+        make: vehicleMake,
+        color: vehicleColor,
+        precinct,
+        county,
+        issuing_agency: issuingAgency,
+        source: "citypay_scraper",
+        ...detailKv,
+      },
+      photoUrls: [],
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // NYC DOF Adapter — Open Data API + CityPay scraper fallback
 // ---------------------------------------------------------------------------
@@ -330,12 +501,31 @@ export const nycAdapter: CityAdapter = {
     return apiTickets;
   },
 
-  async getTicketDetails(violationNumber: string): Promise<TicketDetail> {
+  async getTicketDetails(
+    violationNumber: string,
+    plates?: Plate[]
+  ): Promise<TicketDetail> {
     const results = await queryApi(
       `summons_number=${encodeURIComponent(violationNumber)}`
     );
 
+    // API miss is common for recent tickets (Open Data lags 1-4 weeks).
+    // Fall back to the CityPay scraper, iterating saved NYC plates.
     if (results.length === 0) {
+      const nycPlates = (plates ?? []).filter((p) => p.city === "nyc");
+      for (const p of nycPlates) {
+        try {
+          const detail = await scrapeCityPayDetail(
+            p.number,
+            p.state,
+            p.type,
+            violationNumber
+          );
+          if (detail) return detail;
+        } catch {
+          // Try next plate.
+        }
+      }
       throw new Error(`No violation found with number ${violationNumber}`);
     }
 

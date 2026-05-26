@@ -187,7 +187,8 @@ server.registerTool(
   async ({ violation_number, city }) => {
     try {
       const adapter = getAdapter(city);
-      const detail = await adapter.getTicketDetails(violation_number);
+      const config = loadConfig();
+      const detail = await adapter.getTicketDetails(violation_number, config.plates);
       const evidence = await gatherEvidence(detail);
       const pastDisputes = getHistoryForCode(city, detail.violationCode);
       const result = { ticketDetails: detail, evidence, commonDefenses: evidence.commonDefenses, pastDisputes: pastDisputes.length > 0 ? pastDisputes : "No past disputes for this violation code", formStructure: adapter.getDisputeFormStructure() };

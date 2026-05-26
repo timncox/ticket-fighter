@@ -60,7 +60,7 @@ export interface CityAdapter {
   readonly displayName: string;
 
   lookupTickets(plate: string, state: string, type: string): Promise<Ticket[]>;
-  getTicketDetails(violationNumber: string): Promise<TicketDetail>;
+  getTicketDetails(violationNumber: string, plates?: Plate[]): Promise<TicketDetail>;
   getDisputeFormStructure(): DisputeFormFields;
   submitDispute(
     violationNumber: string,
