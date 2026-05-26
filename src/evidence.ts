@@ -7,6 +7,7 @@ import { getDecisionsDir } from "./config.js";
 
 export interface EvidencePackage {
   streetViewImages: string[];
+  summonsImagePath: string | null;
   registrationDiscrepancies: string[];
   trafficRuleText: string;
   commonDefenses: string[];
@@ -107,6 +108,75 @@ function buildTrafficRuleUrl(city: string): string {
   }
 }
 
+// Best-effort capture of the scanned summons image. NYCServ's ShowImage
+// endpoint is Akamai-protected and the searchID in the URL is bound to the
+// session that minted it — a standalone fetch (even with cookie-seeding via
+// nycserv.nyc.gov entry pages) returns "Access Denied". To actually pull
+// the image, the capture must run inside the same Playwright context as a
+// fresh CityPay plate search. This implementation is the placeholder that
+// surfaces the limitation cleanly; the real fix moves the image capture
+// into scrapeCityPayDetail in adapters/nyc.ts.
+async function captureSummonsImage(
+  ticket: TicketDetail
+): Promise<string | null> {
+  const viewerUrl = ticket.rawData?.summons_image_viewer_url;
+  if (!viewerUrl) return null;
+
+  const decisionsDir = getDecisionsDir();
+  const outputPath = path.join(
+    decisionsDir,
+    `summons-${ticket.violationNumber}.png`
+  );
+
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      locale: "en-US",
+      extraHTTPHeaders: {
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1400, height: 1800 });
+
+    // NYCServ's image endpoint is protected by Akamai; a direct hit without
+    // prior session context returns Access Denied. Seed the session by
+    // landing on the NYCServ entry page first, then navigate to the image.
+    try {
+      await page.goto("https://nycserv.nyc.gov/NYCServWeb/PVO_Search.jsp", {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+    } catch {
+      // Best-effort — proceed even if the entry page fails.
+    }
+    await page.goto(viewerUrl, { waitUntil: "networkidle", timeout: 30000 });
+
+    // NYCServ's image viewer renders the scan as an <img>. Prefer that
+    // element's bounding box; fall back to a full-page screenshot.
+    const img = page.locator("img").first();
+    if (await img.count() > 0) {
+      await img.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+      try {
+        await img.screenshot({ path: outputPath });
+        return outputPath;
+      } catch {
+        // Fall through to full-page capture.
+      }
+    }
+    await page.screenshot({ path: outputPath, fullPage: true });
+    return outputPath;
+  } catch {
+    return null;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function captureStreetView(
   ticket: TicketDetail
 ): Promise<string[]> {
@@ -151,11 +221,21 @@ export async function gatherEvidence(
     // Street View capture is best-effort — failure is not fatal
   }
 
-  // 4. Build traffic rule reference URL
+  // 4. Capture the scanned summons image (best-effort). This is the only
+  // source that carries the officer-written street + "First Observed" field.
+  let summonsImagePath: string | null = null;
+  try {
+    summonsImagePath = await captureSummonsImage(ticket);
+  } catch {
+    // Best-effort.
+  }
+
+  // 5. Build traffic rule reference URL
   const trafficRuleText = buildTrafficRuleUrl(ticket.city);
 
   return {
     streetViewImages,
+    summonsImagePath,
     registrationDiscrepancies: [],
     trafficRuleText,
     commonDefenses,
