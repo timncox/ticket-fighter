@@ -77,6 +77,39 @@ async function queryApi(params: string): Promise<SodaViolation[]> {
   return resp.json() as Promise<SodaViolation[]>;
 }
 
+// Values interpolated into SoQL ($where=...) come from user/LLM input.
+// URL-encoding the wrapped expression doesn't sanitize — quotes get decoded
+// server-side and break out of the string literal. Whitelist the inputs.
+function assertPlate(plate: string): string {
+  const v = plate.toUpperCase();
+  if (!/^[A-Z0-9 \-]{1,10}$/.test(v)) {
+    throw new Error(`Invalid plate: ${plate}`);
+  }
+  return v;
+}
+function assertState(state: string): string {
+  const v = state.toUpperCase();
+  if (!/^[A-Z]{2}$/.test(v)) {
+    throw new Error(`Invalid state: ${state}`);
+  }
+  return v;
+}
+function assertSummonsNumber(n: string): string {
+  // summons_number is a numeric column in the dataset — digits only.
+  if (!/^\d{1,15}$/.test(n)) {
+    throw new Error(`Invalid violation number: ${n}`);
+  }
+  return n;
+}
+
+// Escape a value for embedding in a Playwright text-engine string literal:
+// :has-text("…"), :text-is("…"). Backslashes and double-quotes need escaping
+// or the selector parser breaks (and a crafted value could match more rows
+// than intended).
+function escapeLocatorText(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function parseAmount(s: string | undefined): number {
   return parseFloat((s ?? "0").replace(/[^0-9.]/g, "")) || 0;
 }
@@ -183,8 +216,9 @@ async function chosenSelect(
       await searchInput.fill(value);
       await sleep(300);
     }
+    // value is user-controlled — escape before embedding in the locator string.
     const result = chosenContainer.locator(
-      "li.active-result:has-text('" + value + "')"
+      `li.active-result:has-text("${escapeLocatorText(value)}")`
     );
     if (await result.count() > 0) {
       await result.first().click();
@@ -432,14 +466,15 @@ export async function captureSummonsImageFromCityPay(
       log(`expand step warning: ${e?.message ?? e}`);
     }
 
+    const vEsc = escapeLocatorText(violationNumber);
     let targetRow = page.locator(
-      `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
+      `table tbody tr:has(td:first-child:text-is("${vEsc}"))`
     ).first();
     if (await targetRow.count() === 0) {
       // After expansion, the violation number may live in any cell within the
       // expanded row, not specifically the first cell. Broaden the match.
       targetRow = page.locator(
-        `table tbody tr:has-text("${violationNumber}")`
+        `table tbody tr:has-text("${vEsc}")`
       ).first();
     }
     if (await targetRow.count() === 0) {
@@ -717,12 +752,13 @@ async function scrapeCityPayDetail(
 
     // Find the row whose first cell matches the requested violation number;
     // fall back to any row containing the number.
+    const vEsc = escapeLocatorText(violationNumber);
     let targetRow = page.locator(
-      `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
+      `table tbody tr:has(td:first-child:text-is("${vEsc}"))`
     ).first();
     if (await targetRow.count() === 0) {
       targetRow = page.locator(
-        `table tbody tr:has-text("${violationNumber}")`
+        `table tbody tr:has-text("${vEsc}")`
       ).first();
     }
     if (await targetRow.count() === 0) {
@@ -845,8 +881,10 @@ export const nycAdapter: CityAdapter = {
     type: string
   ): Promise<Ticket[]> {
     // Primary: Open Data API (fast, no CAPTCHA, but can lag weeks behind)
+    const safePlate = assertPlate(plate);
+    const safeState = assertState(state);
     const where = encodeURIComponent(
-      `plate='${plate.toUpperCase()}' AND state='${state.toUpperCase()}'`
+      `plate='${safePlate}' AND state='${safeState}'`
     );
     const apiResults = await queryApi(
       `$where=${where}&$order=issue_date DESC&$limit=50`
@@ -886,8 +924,9 @@ export const nycAdapter: CityAdapter = {
     violationNumber: string,
     plates?: Plate[]
   ): Promise<TicketDetail> {
+    const safeNumber = assertSummonsNumber(violationNumber);
     const results = await queryApi(
-      `$where=${encodeURIComponent(`summons_number=${violationNumber}`)}`
+      `$where=${encodeURIComponent(`summons_number=${safeNumber}`)}`
     );
 
     // API miss is common for recent tickets (Open Data lags 1-4 weeks).
@@ -981,8 +1020,9 @@ export const nycAdapter: CityAdapter = {
   },
 
   async checkDisposition(violationNumber: string): Promise<DisputeStatus> {
+    const safeNumber = assertSummonsNumber(violationNumber);
     const results = await queryApi(
-      `$where=${encodeURIComponent(`summons_number=${violationNumber}`)}`
+      `$where=${encodeURIComponent(`summons_number=${safeNumber}`)}`
     );
 
     if (results.length === 0) {

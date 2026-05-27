@@ -37,6 +37,30 @@ async function queryApi(params: string): Promise<SfCitation[]> {
   return resp.json() as Promise<SfCitation[]>;
 }
 
+// Values interpolated into SoQL ($where=...) come from user/LLM input.
+// URL-encoding doesn't help — server-side decoding lets quotes break out of
+// the string literal. Whitelist the inputs.
+function assertPlate(plate: string): string {
+  const v = plate.toUpperCase();
+  if (!/^[A-Z0-9 \-]{1,10}$/.test(v)) {
+    throw new Error(`Invalid plate: ${plate}`);
+  }
+  return v;
+}
+function assertState(state: string): string {
+  const v = state.toUpperCase();
+  if (!/^[A-Z]{2}$/.test(v)) {
+    throw new Error(`Invalid state: ${state}`);
+  }
+  return v;
+}
+function assertCitationNumber(n: string): string {
+  if (!/^[A-Z0-9\-]{1,20}$/i.test(n)) {
+    throw new Error(`Invalid citation number: ${n}`);
+  }
+  return n;
+}
+
 function parseAmount(s: string | undefined): number {
   return parseFloat((s ?? "0").replace(/[^0-9.]/g, "")) || 0;
 }
@@ -162,8 +186,10 @@ export const sfAdapter: CityAdapter = {
     _type: string
   ): Promise<Ticket[]> {
     // Primary: Open Data API
+    const safePlate = assertPlate(plate);
+    const safeState = assertState(state);
     const where = encodeURIComponent(
-      `vehicle_plate='${plate.toUpperCase()}' AND vehicle_plate_state='${state.toUpperCase()}'`
+      `vehicle_plate='${safePlate}' AND vehicle_plate_state='${safeState}'`
     );
     const apiResults = await queryApi(
       `$where=${where}&$order=citation_issued_datetime DESC&$limit=50`
@@ -197,7 +223,7 @@ export const sfAdapter: CityAdapter = {
 
   async getTicketDetails(violationNumber: string): Promise<TicketDetail> {
     const results = await queryApi(
-      `citation_number=${encodeURIComponent(violationNumber)}`
+      `citation_number=${encodeURIComponent(assertCitationNumber(violationNumber))}`
     );
 
     if (results.length === 0) {
@@ -255,7 +281,7 @@ export const sfAdapter: CityAdapter = {
 
   async checkDisposition(violationNumber: string): Promise<DisputeStatus> {
     const results = await queryApi(
-      `citation_number=${encodeURIComponent(violationNumber)}`
+      `citation_number=${encodeURIComponent(assertCitationNumber(violationNumber))}`
     );
 
     if (results.length === 0) {
