@@ -137,6 +137,43 @@ async function chosenSelect(
   selectId: string,
   value: string
 ): Promise<void> {
+  // The Chosen jQuery widget wraps a native <select>. Driving the UI by
+  // clicking the search result is unreliable — the Chosen library doesn't
+  // always sync the underlying <select> in headless Playwright, and the
+  // visible label often differs from the value (e.g., the option value is
+  // "PAS" but the label is "Passenger - PAS"). Set the underlying <select>
+  // value directly and trigger Chosen's update event so its UI re-syncs.
+  // Match by either value or visible label, whichever hits first.
+  const ok = await page.evaluate(
+    ({ selectId, value }) => {
+      const sel = document.querySelector(selectId) as HTMLSelectElement | null;
+      if (!sel) return false;
+      const v = value.trim().toLowerCase();
+      let matched = false;
+      for (const opt of Array.from(sel.options)) {
+        if (
+          opt.value.trim().toLowerCase() === v ||
+          opt.text.trim().toLowerCase() === v ||
+          opt.text.trim().toLowerCase().includes(v)
+        ) {
+          sel.value = opt.value;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return false;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+      // If Chosen is loaded, tell it to refresh from the new value.
+      const $ = (window as unknown as { jQuery?: (s: string) => { trigger?: (e: string) => unknown } }).jQuery;
+      if ($) $(selectId).trigger?.("chosen:updated");
+      return true;
+    },
+    { selectId, value }
+  );
+
+  if (ok) return;
+
+  // Fallback: drive the Chosen UI directly.
   const chosenContainer = page.locator(`${selectId}_chosen`);
   if (await chosenContainer.count() > 0) {
     await chosenContainer.click();

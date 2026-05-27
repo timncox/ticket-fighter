@@ -66,6 +66,28 @@ import { getAllAdapters } from "./adapters/registry.js";
 const SUPPORTED_CITIES = getAllAdapters().map((a) => a.cityId) as [string, ...string[]];
 const cityEnum = z.enum(SUPPORTED_CITIES);
 
+// NYC DOF's Hearing-by-Web form runs an aggressive "remove special characters"
+// validator on the argument textarea. The rejected set (verified 2026-05-26):
+// em/en dashes, curly quotes, section sign, pound, parens, forward slash,
+// colon, straight double-quote. Pre-strip these so generated disputes don't
+// trip the validator.
+function sanitizeDisputeArguments(city: string, text: string): string {
+  if (city !== "nyc") return text;
+  return text
+    .replace(/[–—]/g, "-")           // en/em dash -> hyphen
+    .replace(/[‘’]/g, "'")            // curly single quotes -> '
+    .replace(/[“”]/g, "'")            // curly double quotes -> '
+    .replace(/§/g, "section")
+    .replace(/#/g, "No.")
+    .replace(/\(/g, " ")
+    .replace(/\)/g, " ")
+    .replace(/\//g, "-")
+    .replace(/:/g, ".")
+    .replace(/"/g, "'")
+    .replace(/  +/g, " ")
+    .trim();
+}
+
 const WIDGET_URI = "ui://ticket-fighter/widget.html";
 let widgetHtml: string;
 try {
@@ -219,14 +241,15 @@ server.registerTool(
     try {
       const adapter = getAdapter(city);
       const form = adapter.getDisputeFormStructure();
-      if (args.length > form.maxArgumentLength) {
+      const sanitizedArgs = sanitizeDisputeArguments(city, args);
+      if (sanitizedArgs.length > form.maxArgumentLength) {
         return { content: [{ type: "text" as const, text: `Error: Arguments exceed max length (${form.maxArgumentLength} chars)` }], isError: true };
       }
       const evidenceFiles = evidence_paths || [];
       if (evidenceFiles.length > form.maxEvidenceFiles) {
         return { content: [{ type: "text" as const, text: `Error: Too many evidence files. Max ${form.maxEvidenceFiles}` }], isError: true };
       }
-      const result = { violation_number, city, arguments: args, evidence_files: evidenceFiles, form_notes: form.notes, status: "PREVIEW — not yet submitted. Call submit_dispute with confirmed=true to submit." };
+      const result = { violation_number, city, arguments: sanitizedArgs, evidence_files: evidenceFiles, form_notes: form.notes, status: "PREVIEW — not yet submitted. Call submit_dispute with confirmed=true to submit." };
       return {
         structuredContent: { tool: "generate_dispute", ...result },
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
@@ -257,10 +280,11 @@ server.registerTool(
     }
     try {
       const adapter = getAdapter(city);
-      const result = await adapter.submitDispute(violation_number, args, evidence_paths || []);
+      const sanitizedArgs = sanitizeDisputeArguments(city, args);
+      const result = await adapter.submitDispute(violation_number, sanitizedArgs, evidence_paths || []);
       addHistoryEntry({
         violationNumber: violation_number, city, plate: "", dateIssued: "", violationCode: "", amount: 0,
-        disputeSubmitted: new Date().toISOString(), argumentsSummary: args.slice(0, 200), evidenceAttached: (evidence_paths || []).length > 0,
+        disputeSubmitted: new Date().toISOString(), argumentsSummary: sanitizedArgs.slice(0, 200), evidenceAttached: (evidence_paths || []).length > 0,
       });
       return {
         structuredContent: { tool: "submit_dispute", ...result },
