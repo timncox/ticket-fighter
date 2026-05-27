@@ -280,6 +280,128 @@ async function scrapeCityPay(
   }
 }
 
+export async function captureSummonsImageFromCityPay(
+  plate: string,
+  state: string,
+  type: string,
+  violationNumber: string,
+  outputPath: string
+): Promise<boolean> {
+  const headless = isCaptchaSolverEnabled();
+  const browser = await chromium.launch({ headless });
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      locale: "en-US",
+    });
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1400, height: 1800 });
+
+    await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
+    await sleep(3000);
+
+    const plateTab = page.locator(
+      "a:has-text('Search By License Plate'), button:has-text('Search By License Plate'), [role='tab']:has-text('Search By License Plate')"
+    );
+    if (await plateTab.count() === 0) return false;
+    await plateTab.first().click();
+    await sleep(1000);
+
+    const plateInput = page.locator(
+      "input[name*='plate' i], input[id*='plate' i], input[placeholder*='plate' i]"
+    ).first();
+    const plateForm = plateInput.locator("xpath=ancestor::form[1]");
+    if (await plateForm.count() === 0) return false;
+
+    await plateInput.fill(plate);
+    await chosenSelect(page, "#PLATE_STATE", state);
+    await chosenSelect(page, "#PLATE_TYPE", type);
+
+    if (headless) {
+      const siteKey = await extractRecaptchaSiteKey(page);
+      if (siteKey) {
+        const token = await solveRecaptchaV2(LOOKUP_URL, siteKey);
+        await injectRecaptchaToken(page, token);
+        await sleep(500);
+      }
+    }
+
+    const submitBtn = plateForm.locator(
+      "button[type='submit'], input[type='submit']"
+    ).first();
+    if (await submitBtn.count() === 0) return false;
+    await submitBtn.evaluate((btn: HTMLElement) => btn.click());
+
+    await page.waitForSelector("table tbody tr, .no-results, .error-message", {
+      timeout: 120_000,
+    }).catch(() => {});
+    await sleep(3000);
+
+    const targetRow = page.locator(
+      `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
+    ).first();
+    if (await targetRow.count() === 0) return false;
+
+    // The summons image is exposed either as a direct ShowImage link in the
+    // row, or via a "View Image" link inside the detail panel after clicking
+    // the row. Try both, capturing the image from inside the authenticated
+    // session so Akamai's ShowImage gate is satisfied.
+    const captureFromLink = async (
+      link: import("playwright").Locator
+    ): Promise<boolean> => {
+      const [newPage] = await Promise.all([
+        context.waitForEvent("page", { timeout: 5000 }).catch(() => null),
+        link.click().catch(() => undefined),
+      ]);
+      const imgPage = newPage ?? page;
+      await imgPage.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await sleep(1500);
+      const img = imgPage.locator("img").first();
+      if (await img.count() > 0) {
+        try {
+          await img.waitFor({ state: "visible", timeout: 5000 });
+          await img.screenshot({ path: outputPath });
+          return true;
+        } catch {
+          // Fall through to full-page capture.
+        }
+      }
+      await imgPage.screenshot({ path: outputPath, fullPage: true });
+      return true;
+    };
+
+    const rowImageLink = targetRow.locator(
+      "a[href*='ShowImage'], a[href*='showImage'], a:has-text('Image')"
+    ).first();
+    if (await rowImageLink.count() > 0) {
+      if (await captureFromLink(rowImageLink)) return true;
+    }
+
+    // Otherwise click into detail first, then look for the image link there.
+    const detailLink = targetRow.locator("a, button").first();
+    if (await detailLink.count() > 0) {
+      try {
+        await detailLink.click();
+        await sleep(1500);
+        const detailImageLink = page.locator(
+          "a[href*='ShowImage'], a[href*='showImage'], a:has-text('View Image'), a:has-text('Summons Image')"
+        ).first();
+        if (await detailImageLink.count() > 0) {
+          if (await captureFromLink(detailImageLink)) return true;
+        }
+      } catch {
+        // No-op.
+      }
+    }
+
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function scrapeCityPayDetail(
   plate: string,
   state: string,
