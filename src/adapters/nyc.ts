@@ -287,7 +287,15 @@ export async function captureSummonsImageFromCityPay(
   violationNumber: string,
   outputPath: string
 ): Promise<boolean> {
+  // Step-by-step diagnostic logging. Gated on TF_DEBUG_SCRAPER=1 so the
+  // production MCP path stays quiet; the test scripts opt in.
+  const verbose = process.env.TF_DEBUG_SCRAPER === "1";
+  const log = (msg: string) => {
+    if (verbose) console.log(`[citypay-image] ${msg}`);
+  };
+
   const headless = isCaptchaSolverEnabled();
+  log(`launch (headless=${headless})`);
   const browser = await chromium.launch({ headless });
   try {
     const context = await browser.newContext({
@@ -297,87 +305,190 @@ export async function captureSummonsImageFromCityPay(
     const page = await context.newPage();
     await page.setViewportSize({ width: 1400, height: 1800 });
 
+    log(`goto ${LOOKUP_URL}`);
     await page.goto(LOOKUP_URL, { waitUntil: "networkidle" });
     await sleep(3000);
 
+    log("locate plate tab");
     const plateTab = page.locator(
       "a:has-text('Search By License Plate'), button:has-text('Search By License Plate'), [role='tab']:has-text('Search By License Plate')"
     );
-    if (await plateTab.count() === 0) return false;
+    if (await plateTab.count() === 0) {
+      log("FAIL: plate tab not found");
+      return false;
+    }
     await plateTab.first().click();
     await sleep(1000);
 
+    log("locate plate input + form");
     const plateInput = page.locator(
       "input[name*='plate' i], input[id*='plate' i], input[placeholder*='plate' i]"
     ).first();
     const plateForm = plateInput.locator("xpath=ancestor::form[1]");
-    if (await plateForm.count() === 0) return false;
+    if (await plateForm.count() === 0) {
+      log("FAIL: plate form not found");
+      return false;
+    }
 
+    log(`fill plate=${plate}, state=${state}, type=${type}`);
     await plateInput.fill(plate);
     await chosenSelect(page, "#PLATE_STATE", state);
     await chosenSelect(page, "#PLATE_TYPE", type);
 
     if (headless) {
+      log("solving reCAPTCHA via API");
       const siteKey = await extractRecaptchaSiteKey(page);
       if (siteKey) {
         const token = await solveRecaptchaV2(LOOKUP_URL, siteKey);
         await injectRecaptchaToken(page, token);
         await sleep(500);
       }
+    } else {
+      log("headed mode — waiting for user to solve reCAPTCHA");
     }
 
+    log("locate submit button");
     const submitBtn = plateForm.locator(
       "button[type='submit'], input[type='submit']"
     ).first();
-    if (await submitBtn.count() === 0) return false;
+    if (await submitBtn.count() === 0) {
+      log("FAIL: submit button not found");
+      return false;
+    }
     await submitBtn.evaluate((btn: HTMLElement) => btn.click());
 
-    await page.waitForSelector("table tbody tr, .no-results, .error-message", {
-      timeout: 120_000,
-    }).catch(() => {});
+    log("waiting for results table (up to 120s)");
+    const tableSel = await page.waitForSelector(
+      "table tbody tr, .no-results, .error-message",
+      { timeout: 120_000 }
+    ).catch(() => null);
+    if (!tableSel) {
+      log("FAIL: results table never appeared (CAPTCHA timeout?)");
+      try {
+        await page.screenshot({ path: outputPath + ".debug.png" });
+        log(`debug screenshot saved to ${outputPath}.debug.png`);
+      } catch { /* no-op */ }
+      return false;
+    }
     await sleep(3000);
 
-    const targetRow = page.locator(
+    const rowCount = await page.locator("table tbody tr").count();
+    log(`results table has ${rowCount} rows; looking for ${violationNumber}`);
+
+    // CityPay renders each violation as a collapsed accordion row that only
+    // shows "Violation $X.XX". The violation number + image link are hidden
+    // until you click the toggle. Expand all collapsed rows first, then
+    // search for the row matching the requested number.
+    try {
+      const toggles = page.locator(
+        "table tbody tr a:has-text('Violation'), table tbody tr [aria-expanded='false'], table tbody tr button"
+      );
+      const toggleCount = await toggles.count();
+      log(`found ${toggleCount} expand toggles; clicking each`);
+      for (let i = 0; i < toggleCount; i++) {
+        await toggles.nth(i).click().catch(() => undefined);
+        await sleep(400);
+      }
+      await sleep(1500);
+    } catch (e: any) {
+      log(`expand step warning: ${e?.message ?? e}`);
+    }
+
+    let targetRow = page.locator(
       `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
     ).first();
-    if (await targetRow.count() === 0) return false;
+    if (await targetRow.count() === 0) {
+      // After expansion, the violation number may live in any cell within the
+      // expanded row, not specifically the first cell. Broaden the match.
+      targetRow = page.locator(
+        `table tbody tr:has-text("${violationNumber}")`
+      ).first();
+    }
+    if (await targetRow.count() === 0) {
+      log("FAIL: no row matched violation number even after expanding");
+      try {
+        const firstCells = await page.locator("table tbody tr td:first-child").allInnerTexts();
+        log(`first-column texts: ${JSON.stringify(firstCells.slice(0, 10))}`);
+        const allText = await page.locator("table tbody").innerText().catch(() => "");
+        log(`tbody text (first 500 chars): ${allText.slice(0, 500).replace(/\s+/g, " ")}`);
+        await page.screenshot({ path: outputPath + ".debug.png", fullPage: true });
+        log(`debug screenshot saved to ${outputPath}.debug.png`);
+      } catch { /* no-op */ }
+      return false;
+    }
+    log("row found");
+    // Snapshot the expanded row so we can see exactly which links exist.
+    try {
+      await page.screenshot({ path: outputPath + ".expanded.png", fullPage: true });
+      log(`expanded-state screenshot saved to ${outputPath}.expanded.png`);
+    } catch { /* no-op */ }
 
     // The summons image is exposed either as a direct ShowImage link in the
     // row, or via a "View Image" link inside the detail panel after clicking
     // the row. Try both, capturing the image from inside the authenticated
     // session so Akamai's ShowImage gate is satisfied.
     const captureFromLink = async (
-      link: import("playwright").Locator
+      link: import("playwright").Locator,
+      label: string
     ): Promise<boolean> => {
+      log(`clicking ${label}`);
       const [newPage] = await Promise.all([
         context.waitForEvent("page", { timeout: 5000 }).catch(() => null),
-        link.click().catch(() => undefined),
+        link.click().catch((e) => {
+          log(`click error: ${e?.message ?? e}`);
+          return undefined;
+        }),
       ]);
       const imgPage = newPage ?? page;
+      log(`new tab opened at ${imgPage.url()} (new tab=${!!newPage})`);
+      // Popups often open at about:blank and then JS sets the location.
+      // Wait for the URL to actually navigate before treating the page as ready.
+      if (newPage) {
+        try {
+          await imgPage.waitForURL(
+            (u) => u.toString() !== "about:blank",
+            { timeout: 15000 }
+          );
+        } catch {
+          log("popup URL never left about:blank");
+        }
+      }
+      await imgPage.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
       await imgPage.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      // Some image viewers don't fire networkidle (lazy-loaded JPGs).
+      // Wait explicitly for an img to mount.
+      await imgPage.locator("img").first().waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
+      log(`settled on ${imgPage.url()}`);
       await sleep(1500);
       const img = imgPage.locator("img").first();
+      const imgCount = await imgPage.locator("img").count();
+      log(`found ${imgCount} <img> elements`);
       if (await img.count() > 0) {
         try {
           await img.waitFor({ state: "visible", timeout: 5000 });
           await img.screenshot({ path: outputPath });
+          log(`captured image element to ${outputPath}`);
           return true;
-        } catch {
-          // Fall through to full-page capture.
+        } catch (e: any) {
+          log(`img screenshot failed: ${e?.message ?? e}`);
         }
       }
       await imgPage.screenshot({ path: outputPath, fullPage: true });
+      log(`captured full-page screenshot to ${outputPath}`);
       return true;
     };
 
+    log("searching for image link inside row");
     const rowImageLink = targetRow.locator(
       "a[href*='ShowImage'], a[href*='showImage'], a:has-text('Image')"
     ).first();
-    if (await rowImageLink.count() > 0) {
-      if (await captureFromLink(rowImageLink)) return true;
+    const rowLinkCount = await rowImageLink.count();
+    log(`row image links: ${rowLinkCount}`);
+    if (rowLinkCount > 0) {
+      if (await captureFromLink(rowImageLink, "row image link")) return true;
     }
 
-    // Otherwise click into detail first, then look for the image link there.
+    log("falling back to detail-panel click");
     const detailLink = targetRow.locator("a, button").first();
     if (await detailLink.count() > 0) {
       try {
@@ -386,16 +497,24 @@ export async function captureSummonsImageFromCityPay(
         const detailImageLink = page.locator(
           "a[href*='ShowImage'], a[href*='showImage'], a:has-text('View Image'), a:has-text('Summons Image')"
         ).first();
-        if (await detailImageLink.count() > 0) {
-          if (await captureFromLink(detailImageLink)) return true;
+        const detailLinkCount = await detailImageLink.count();
+        log(`detail-panel image links: ${detailLinkCount}`);
+        if (detailLinkCount > 0) {
+          if (await captureFromLink(detailImageLink, "detail image link")) return true;
+        } else {
+          // Capture the detail panel itself as a diagnostic.
+          await page.screenshot({ path: outputPath + ".detail.png" });
+          log(`detail panel screenshot saved to ${outputPath}.detail.png`);
         }
-      } catch {
-        // No-op.
+      } catch (e: any) {
+        log(`detail click failed: ${e?.message ?? e}`);
       }
     }
 
+    log("FAIL: exhausted all image-link strategies");
     return false;
-  } catch {
+  } catch (e: any) {
+    log(`UNCAUGHT: ${e?.message ?? e}`);
     return false;
   } finally {
     await browser.close();
@@ -462,10 +581,32 @@ async function scrapeCityPayDetail(
     }).catch(() => {});
     await sleep(3000);
 
-    // Find the row whose first cell matches the requested violation number.
-    const targetRow = page.locator(
+    // CityPay collapses violations into accordion rows — the violation number
+    // only appears after expansion. Click every expand toggle, then search.
+    try {
+      const toggles = page.locator(
+        "table tbody tr a:has-text('Violation'), table tbody tr [aria-expanded='false'], table tbody tr button"
+      );
+      const toggleCount = await toggles.count();
+      for (let i = 0; i < toggleCount; i++) {
+        await toggles.nth(i).click().catch(() => undefined);
+        await sleep(400);
+      }
+      await sleep(1500);
+    } catch {
+      // Best-effort expansion; continue regardless.
+    }
+
+    // Find the row whose first cell matches the requested violation number;
+    // fall back to any row containing the number.
+    let targetRow = page.locator(
       `table tbody tr:has(td:first-child:text-is("${violationNumber}"))`
     ).first();
+    if (await targetRow.count() === 0) {
+      targetRow = page.locator(
+        `table tbody tr:has-text("${violationNumber}")`
+      ).first();
+    }
     if (await targetRow.count() === 0) {
       return null;
     }
@@ -628,7 +769,7 @@ export const nycAdapter: CityAdapter = {
     plates?: Plate[]
   ): Promise<TicketDetail> {
     const results = await queryApi(
-      `summons_number=${encodeURIComponent(violationNumber)}`
+      `$where=${encodeURIComponent(`summons_number=${violationNumber}`)}`
     );
 
     // API miss is common for recent tickets (Open Data lags 1-4 weeks).
@@ -723,7 +864,7 @@ export const nycAdapter: CityAdapter = {
 
   async checkDisposition(violationNumber: string): Promise<DisputeStatus> {
     const results = await queryApi(
-      `summons_number=${encodeURIComponent(violationNumber)}`
+      `$where=${encodeURIComponent(`summons_number=${violationNumber}`)}`
     );
 
     if (results.length === 0) {

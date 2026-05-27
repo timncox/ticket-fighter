@@ -4,6 +4,8 @@
 // of the saved PNG so it can be read with vision.
 //
 // Usage: node scripts/test-summons-image.mjs [violationNumber]
+// Logs every step of the CityPay scraper via TF_DEBUG_SCRAPER=1.
+process.env.TF_DEBUG_SCRAPER = "1";
 
 import { loadConfig } from "../dist/config.js";
 import { nycAdapter } from "../dist/adapters/nyc.js";
