@@ -1,4 +1,5 @@
 import fs from "fs";
+import { promises as fsp } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { chromium } from "playwright";
@@ -454,12 +455,92 @@ export async function captureSummonsImageFromCityPay(
         }
       }
       await imgPage.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+      const settledUrl = imgPage.url();
+      log(`settled on ${settledUrl}`);
+
+      // NYCServ ShowImage serves the summons as a multi-page PDF — Chrome
+      // renders it without an <img> tag. Try to grab the PDF binary directly
+      // for clean multi-page output; fall back to per-page screenshots.
+      // Akamai checks more than cookies (Referer, Sec-Fetch headers, TLS
+      // fingerprint), so a raw context.request.get is blocked. Issue the
+      // fetch from inside the popup page itself so it carries the full
+      // browser fingerprint.
+      if (/ShowImage/i.test(settledUrl)) {
+        const pdfPath = outputPath.replace(/\.png$/i, ".pdf");
+        try {
+          const result = await imgPage.evaluate(async (url) => {
+            try {
+              const r = await fetch(url, { credentials: "include" });
+              if (!r.ok) return { ok: false, status: r.status };
+              const buf = await r.arrayBuffer();
+              return {
+                ok: true,
+                contentType: r.headers.get("content-type") ?? "",
+                bytes: Array.from(new Uint8Array(buf)),
+              };
+            } catch (e: any) {
+              return { ok: false, error: String(e?.message ?? e) };
+            }
+          }, settledUrl);
+
+          if (result.ok && Array.isArray(result.bytes)) {
+            const buf = Buffer.from(result.bytes);
+            const isPdf =
+              (result.contentType ?? "").includes("pdf") ||
+              (buf.length >= 5 && buf.subarray(0, 5).toString() === "%PDF-");
+            if (isPdf) {
+              await fsp.writeFile(pdfPath, buf);
+              log(`saved PDF (${buf.length} bytes) to ${pdfPath}`);
+              return true;
+            }
+            log(`in-page fetch returned non-PDF (content-type=${result.contentType})`);
+          } else {
+            log(`in-page PDF fetch failed: status=${result.status ?? "?"} error=${result.error ?? ""}`);
+          }
+        } catch (e: any) {
+          log(`in-page PDF fetch threw: ${e?.message ?? e}`);
+        }
+
+        // Fall back to per-page screenshots via the PDF viewer's #page= hash.
+        // Chrome's built-in PDF viewer supports #page=N to navigate.
+        try {
+          const pageCount = await imgPage.evaluate(() => {
+            const meta = document.querySelector("meta[name='page_count']");
+            if (meta) return Number(meta.getAttribute("content")) || 0;
+            return 0;
+          });
+          // Default to probing 1..4 if we can't read a count.
+          const probePages = pageCount > 0 ? pageCount : 4;
+          log(`capturing ${probePages} PDF pages via #page= hash`);
+          let captured = 0;
+          for (let n = 1; n <= probePages; n++) {
+            const pagePath = n === 1
+              ? outputPath
+              : outputPath.replace(/\.png$/i, `.page${n}.png`);
+            const pageUrl = settledUrl.includes("#")
+              ? settledUrl.replace(/#.*/, `#page=${n}`)
+              : `${settledUrl}#page=${n}`;
+            try {
+              await imgPage.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+            } catch {
+              // Same-document navigations don't fire load events — that's OK.
+            }
+            await sleep(2000);
+            await imgPage.screenshot({ path: pagePath, fullPage: true });
+            log(`captured page ${n} to ${pagePath}`);
+            captured++;
+          }
+          if (captured > 0) return true;
+        } catch (e: any) {
+          log(`per-page capture failed: ${e?.message ?? e}`);
+        }
+      }
+
+      // Fallback: wait for an <img> if one exists, else take a full-page
+      // screenshot of whatever the viewer shows.
       await imgPage.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-      // Some image viewers don't fire networkidle (lazy-loaded JPGs).
-      // Wait explicitly for an img to mount.
-      await imgPage.locator("img").first().waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
-      log(`settled on ${imgPage.url()}`);
-      await sleep(1500);
+      await imgPage.locator("img").first().waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
+      await sleep(1000);
       const img = imgPage.locator("img").first();
       const imgCount = await imgPage.locator("img").count();
       log(`found ${imgCount} <img> elements`);

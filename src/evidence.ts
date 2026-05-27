@@ -139,7 +139,12 @@ async function captureSummonsImage(
       ticket.violationNumber,
       outputPath
     );
-    return captured ? outputPath : null;
+    if (!captured) return null;
+    // captureSummonsImageFromCityPay writes a .pdf next to outputPath when
+    // it can pull the PDF binary directly; prefer that over the PNG.
+    const pdfPath = outputPath.replace(/\.png$/i, ".pdf");
+    if (fs.existsSync(pdfPath)) return pdfPath;
+    return fs.existsSync(outputPath) ? outputPath : null;
   } catch {
     return null;
   }
