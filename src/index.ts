@@ -400,15 +400,81 @@ async function main() {
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
 
   if (PORT) {
-    // HTTP mode — Streamable HTTP transport for remote access
+    // HTTP mode — Streamable HTTP transport for remote access.
+    //
+    // Security: the MCP endpoint exposes tools that submit disputes, scrape
+    // portals, and read saved plates. The transport itself has no auth, so:
+    //   * Bind to 127.0.0.1 by default — only opt in to public binding via
+    //     HOST=0.0.0.0 when a fronting reverse proxy provides TLS + auth.
+    //   * Restrict CORS to an explicit allowlist (ALLOWED_ORIGINS, comma-
+    //     separated). Default is empty — disallow cross-origin browser
+    //     requests entirely so a malicious page can't drive the MCP via the
+    //     user's browser.
+    //   * Validate the Origin header on /mcp to defeat DNS-rebinding attacks
+    //     against the loopback bind.
+    //   * Require a bearer token via MCP_AUTH_TOKEN when configured.
+    const HOST = process.env.HOST ?? "127.0.0.1";
+    const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN ?? "";
+    const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const app = express();
-    app.use(cors());
-    app.use(express.json());
+    app.disable("x-powered-by");
+    app.use(
+      cors({
+        origin: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : false,
+        credentials: false,
+      })
+    );
+    app.use(express.json({ limit: "1mb" }));
 
     // Session management
     const sessions = new Map<string, StreamableHTTPServerTransport>();
 
+    const isOriginAllowed = (origin: string | undefined): boolean => {
+      // Same-origin / non-browser callers (curl, MCP clients) typically omit
+      // Origin. Allow that.
+      if (!origin) return true;
+      if (ALLOWED_ORIGINS.includes(origin)) return true;
+      // Permit loopback origins when bound to loopback — useful for local
+      // browser-based clients pointing at http://localhost:<PORT>.
+      if (HOST === "127.0.0.1" || HOST === "::1" || HOST === "localhost") {
+        try {
+          const { hostname } = new URL(origin);
+          if (
+            hostname === "localhost" ||
+            hostname === "127.0.0.1" ||
+            hostname === "::1"
+          ) {
+            return true;
+          }
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    };
+
     app.all("/mcp", async (req, res) => {
+      // Reject browser-driven cross-origin requests (DNS-rebinding defense).
+      const origin = req.headers.origin as string | undefined;
+      if (!isOriginAllowed(origin)) {
+        res.status(403).json({ error: "Origin not allowed" });
+        return;
+      }
+
+      // Optional bearer-token auth.
+      if (AUTH_TOKEN) {
+        const auth = req.headers.authorization ?? "";
+        const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+        if (presented !== AUTH_TOKEN) {
+          res.status(401).json({ error: "Unauthorized" });
+          return;
+        }
+      }
+
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
       if (sessionId && sessions.has(sessionId)) {
@@ -451,9 +517,15 @@ async function main() {
       res.json({ status: "ok", service: "ticket-fighter", timestamp: new Date().toISOString() });
     });
 
-    app.listen(PORT, () => {
-      console.log(`ticket-fighter MCP server (HTTP) listening on :${PORT}`);
-      console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+    app.listen(PORT, HOST, () => {
+      console.log(`ticket-fighter MCP server (HTTP) listening on ${HOST}:${PORT}`);
+      console.log(`MCP endpoint: http://${HOST}:${PORT}/mcp`);
+      if (!AUTH_TOKEN) {
+        console.warn(
+          "WARNING: MCP_AUTH_TOKEN is not set — /mcp is unauthenticated. " +
+            "Only run on a loopback host or behind a fronting auth proxy."
+        );
+      }
     });
   } else {
     // Stdio mode — for local subprocess usage

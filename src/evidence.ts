@@ -27,6 +27,15 @@ const CODES_DIR = path.join(
   "codes"
 );
 
+// ticket.violationNumber comes from external input (LLM/portal scrape) and
+// flows into filenames under the decisions dir. Without sanitization, a
+// crafted value like "../../etc/passwd" would write outside the dir.
+function safeFileToken(s: string): string {
+  const cleaned = s.replace(/[^A-Za-z0-9_\-]/g, "");
+  if (!cleaned) throw new Error("Invalid violation number for filename");
+  return cleaned.slice(0, 40);
+}
+
 function loadCityDefenses(city: string, violationCode: string): string[] {
   const codesFile = path.join(CODES_DIR, `${city}-codes.json`);
   if (!fs.existsSync(codesFile)) return [];
@@ -128,7 +137,7 @@ async function captureSummonsImage(
   const decisionsDir = getDecisionsDir();
   const outputPath = path.join(
     decisionsDir,
-    `summons-${ticket.violationNumber}.png`
+    `summons-${safeFileToken(ticket.violationNumber)}.png`
   );
 
   try {
@@ -162,7 +171,7 @@ async function captureStreetView(
   const decisionsDir = getDecisionsDir();
   const outputPath = path.join(
     decisionsDir,
-    `streetview-${ticket.violationNumber}.png`
+    `streetview-${safeFileToken(ticket.violationNumber)}.png`
   );
 
   const browser = await chromium.launch({ headless: true });
